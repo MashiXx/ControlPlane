@@ -9,7 +9,7 @@ export function requestLog() {
       logger.info({
         method: req.method, path: req.path,
         status: res.statusCode, ms: Date.now() - started,
-        actor: req.actor,
+        actor: req.actor, requestId: req.requestId,
       }, 'http');
     });
     next();
