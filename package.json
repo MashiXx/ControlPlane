@@ -1,0 +1,27 @@
+{
+  "name": "controlplane",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Distributed process management system for Node.js and Java applications.",
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "queue",
+    "controller",
+    "agent",
+    "bot",
+    "web"
+  ],
+  "scripts": {
+    "db:init": "mysql --protocol=TCP -h ${DB_HOST:-127.0.0.1} -P ${DB_PORT:-3306} -u ${DB_USER:-root} -p${DB_PASSWORD:-root} ${DB_NAME:-controlplane} < db/schema.sql",
+    "dev:controller": "npm --workspace controller run dev",
+    "dev:agent": "npm --workspace agent run dev",
+    "dev:bot": "npm --workspace bot run dev",
+    "dev:web": "npm --workspace web run dev",
+    "lint": "echo 'add eslint in later steps'",
+    "test": "echo 'add tests in later steps'"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

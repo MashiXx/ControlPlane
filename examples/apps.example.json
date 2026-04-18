@@ -1,0 +1,50 @@
+{
+  "groups": [
+    { "name": "payment",    "description": "Payment domain services" },
+    { "name": "core",       "description": "Core platform services" }
+  ],
+  "servers": [
+    {
+      "name": "srv-eu-1",
+      "hostname": "10.0.0.11",
+      "labels": { "region": "eu", "env": "prod" }
+    },
+    {
+      "name": "srv-eu-2",
+      "hostname": "10.0.0.12",
+      "labels": { "region": "eu", "env": "prod" }
+    }
+  ],
+  "applications": [
+    {
+      "name": "payments-api",
+      "serverName": "srv-eu-1",
+      "groupName": "payment",
+      "runtime": "node",
+      "repoUrl": "https://github.com/example/payments-api.git",
+      "branch": "main",
+      "workdir": "/var/lib/controlplane/apps/payments-api",
+      "installCmd": "npm ci --production",
+      "buildCmd":   "npm run build",
+      "startCmd":   "node dist/server.js",
+      "healthCmd":  "curl -fsS http://127.0.0.1:3000/health",
+      "env": { "NODE_ENV": "production", "PORT": "3000" },
+      "trusted": false,
+      "enabled": true
+    },
+    {
+      "name": "ledger",
+      "serverName": "srv-eu-2",
+      "groupName": "payment",
+      "runtime": "java",
+      "repoUrl": "https://github.com/example/ledger.git",
+      "branch": "main",
+      "workdir": "/var/lib/controlplane/apps/ledger",
+      "buildCmd":  "./mvnw -q -DskipTests package",
+      "startCmd":  "java -jar target/ledger.jar --server.port=8090",
+      "healthCmd": "curl -fsS http://127.0.0.1:8090/actuator/health",
+      "trusted": false,
+      "enabled": true
+    }
+  ]
+}
