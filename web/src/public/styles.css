@@ -1,0 +1,63 @@
+* { box-sizing: border-box; }
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+  margin: 0; background: #0e1116; color: #e6edf3;
+}
+header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 20px; background: #161b22; border-bottom: 1px solid #30363d;
+}
+header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+.dot {
+  width: 10px; height: 10px; border-radius: 50%; background: #f85149;
+  box-shadow: 0 0 6px currentColor;
+}
+.dot.ok { background: #3fb950; }
+
+.tabs {
+  display: flex; gap: 2px; padding: 0 16px; background: #0d1117;
+  border-bottom: 1px solid #30363d;
+}
+.tabs button {
+  background: transparent; color: #8b949e; border: 0; padding: 10px 14px;
+  cursor: pointer; border-bottom: 2px solid transparent;
+}
+.tabs button.active { color: #e6edf3; border-bottom-color: #2f81f7; }
+
+main { padding: 16px 20px; }
+.tab { display: none; }
+.tab.active { display: block; }
+
+.toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+button, select {
+  background: #21262d; color: #e6edf3; border: 1px solid #30363d;
+  padding: 6px 10px; border-radius: 6px; cursor: pointer; font: inherit;
+}
+button:hover { background: #30363d; }
+button.danger { border-color: #da3633; color: #ff6a69; }
+button.danger:hover { background: #3a1112; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #21262d; }
+th { color: #8b949e; font-weight: 500; background: #161b22; position: sticky; top: 0; }
+tr:hover td { background: #161b22; }
+
+.badge {
+  padding: 2px 6px; border-radius: 4px; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.st-running  { background: #0d3f1a; color: #7ee787; }
+.st-stopped  { background: #21262d; color: #8b949e; }
+.st-crashed  { background: #3a1112; color: #ff7b72; }
+.st-starting { background: #3a3011; color: #d4a72c; }
+.st-unknown  { background: #21262d; color: #8b949e; }
+.st-pending  { background: #21262d; color: #8b949e; }
+.st-success  { background: #0d3f1a; color: #7ee787; }
+.st-failed   { background: #3a1112; color: #ff7b72; }
+.st-cancelled{ background: #21262d; color: #8b949e; }
+
+pre#live-logs {
+  background: #010409; color: #c9d1d9; padding: 12px; border-radius: 6px;
+  height: 70vh; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}

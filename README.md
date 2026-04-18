@@ -129,12 +129,10 @@ npm run dev:bot                 # starts telegram bot (needs TELEGRAM_TOKEN)
 
 ## Implementation status
 
-This repository is being built step by step.
-
 - [x] Step 1 — Architecture, project skeleton, data models (`shared/`, `db/schema.sql`)
-- [ ] Step 2 — Queue system (`queue/`)
-- [ ] Step 3 — Agent
-- [ ] Step 4 — Controller (API, WS hub, orchestrator, worker)
-- [ ] Step 5 — Logging + audit pipeline
-- [ ] Step 6 — Telegram bot
-- [ ] Step 7 — Web dashboard
+- [x] Step 2 — Queue system (`queue/`)
+- [x] Step 3 — Agent
+- [x] Step 4 — Controller (API, WS hub, orchestrator, worker)
+- [x] Step 5 — Logging + audit pipeline (request-id correlation, `/api/metrics`)
+- [x] Step 6 — Telegram bot
+- [x] Step 7 — Web dashboard
