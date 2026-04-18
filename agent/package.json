@@ -1,0 +1,15 @@
+{
+  "name": "@cp/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "dev":   "node --env-file=../.env src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@cp/shared": "*",
+    "ws": "^8.18.0"
+  }
+}
