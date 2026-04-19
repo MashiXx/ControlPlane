@@ -1,5 +1,7 @@
 import express from 'express';
 import cookieParser from 'cookie-parser';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { requireAuth } from '../auth/requireAuth.js';
 import { authRouter } from './routes/auth.js';
 import { actionsRouter } from './routes/actions.js';
@@ -9,6 +11,8 @@ import { artifactBlobRouter, artifactTokenRouter } from './routes/artifacts.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { requestLog } from './middleware/requestLog.js';
 import { requestId } from './middleware/requestId.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export function buildHttpApp({
   apiTokens,
@@ -46,6 +50,9 @@ export function buildHttpApp({
   app.use('/api', metricsRouter());
   app.use('/api', artifactTokenRouter({ secret: artifactSecret, publicBaseUrl }));
   app.use('/api', actionsRouter());
+
+  // SPA static assets. Served last so it doesn't shadow /api or /auth.
+  app.use(express.static(path.join(__dirname, '..', '..', 'public')));
 
   app.use(errorHandler);
   return app;
