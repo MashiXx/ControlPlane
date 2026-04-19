@@ -21,6 +21,9 @@ const app = buildHttpApp({
   apiTokens: config.apiTokens,
   artifactSecret: config.artifactSecret,
   publicBaseUrl: config.publicBaseUrl,
+  sessionSecret: config.jwtSecret,
+  dashboardPasswordHash: config.dashboardPasswordHash,
+  isProd: config.isProd,
 });
 const httpServer = http.createServer(app);
 
