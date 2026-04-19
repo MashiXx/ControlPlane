@@ -176,7 +176,12 @@ CREATE TABLE IF NOT EXISTS jobs (
   attempts        INT UNSIGNED  NOT NULL DEFAULT 0,
   max_attempts    INT UNSIGNED  NOT NULL DEFAULT 3,
 
-  -- user who triggered the job: e.g. "telegram:12345", "web:alice", "system"
+  -- user who triggered the job. Possible actor strings:
+  --   "telegram:<chat_id>"  — Telegram bot command (in-process)
+  --   "web"                 — dashboard SPA (cookie-session auth; single-user)
+  --   "api:<token-name>"    — external script via CONTROLLER_API_TOKENS bearer
+  --   "agent:<id>"          — agent-initiated event (e.g. agent.connect)
+  --   "system"              — controller-internal trigger
   triggered_by    VARCHAR(128)  NOT NULL,
   -- request payload (as submitted) and final result (stdout/stderr, timings)
   payload         JSON          NULL,
@@ -208,7 +213,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   occurred_at     TIMESTAMP(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 
-  actor           VARCHAR(128)  NOT NULL,   -- "telegram:12345" / "web:alice" / "system"
+  actor           VARCHAR(128)  NOT NULL,   -- see jobs.triggered_by for the actor format
   action          VARCHAR(64)   NOT NULL,   -- "restart","build","deploy","agent.connect", ...
   target_type     VARCHAR(32)   NOT NULL,   -- "app","group","server","job"
   target_id       VARCHAR(64)   NULL,       -- stringified id or name
@@ -263,8 +268,11 @@ CREATE TABLE IF NOT EXISTS deployments (
 ) ENGINE=InnoDB;
 
 -- ─────────────────────────────────────────────────────────────────────────
--- api_tokens — for human + service clients hitting the REST API
--- Keeping separate from servers.auth_token because lifecycle is different.
+-- api_tokens — reserved for future per-token DB-backed auth.
+-- Currently UNUSED by the runtime: the controller reads bearer tokens from
+-- the CONTROLLER_API_TOKENS env var and the dashboard uses cookie sessions
+-- (DASHBOARD_PASSWORD_HASH). Keep the table so the migration path exists
+-- when we want rotatable, scoped tokens with a revoke audit trail.
 -- ─────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS api_tokens (
   id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
