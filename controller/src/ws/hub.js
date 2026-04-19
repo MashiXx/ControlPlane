@@ -19,13 +19,16 @@ import { newSessionId, sha256Hex } from '@cp/shared/ids';
 import { createLogger } from '@cp/shared/logger';
 import { servers, applications, jobs as jobsRepo } from '../db/repositories.js';
 import { writeAudit } from '../audit/audit.js';
+import { parse as parseCookie } from 'cookie';
+import { SESSION_COOKIE_NAME, verifySessionToken } from '../auth/session.js';
 
 const logger = createLogger({ service: 'ws.hub' });
 
 export class WsHub {
-  constructor({ httpServer, heartbeatMs, onJobResult }) {
+  constructor({ httpServer, heartbeatMs, onJobResult, sessionSecret }) {
     this.heartbeatMs = heartbeatMs;
     this.onJobResult = onJobResult;
+    this.sessionSecret = sessionSecret;
 
     /** @type {Map<number, AgentSession>} */
     this.sessionsByServer = new Map();
@@ -43,10 +46,21 @@ export class WsHub {
     if (url.pathname === '/agent') {
       this.wss.handleUpgrade(req, socket, head, (ws) => this._attachAgent(ws, req));
     } else if (url.pathname === '/ui') {
+      if (!this._uiAuthOk(req)) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
+      }
       this.wss.handleUpgrade(req, socket, head, (ws) => this._attachUi(ws, req));
     } else {
       socket.destroy();
     }
+  }
+
+  _uiAuthOk(req) {
+    const cookies = parseCookie(req.headers.cookie ?? '');
+    const v = verifySessionToken(this.sessionSecret, cookies[SESSION_COOKIE_NAME]);
+    return v.ok;
   }
 
   // ─── Agent connections ────────────────────────────────────────────────

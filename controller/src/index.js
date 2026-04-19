@@ -30,6 +30,7 @@ const httpServer = http.createServer(app);
 const hub = new WsHub({
   httpServer,
   heartbeatMs: HEARTBEAT_INTERVAL_MS,
+  sessionSecret: config.jwtSecret,
 });
 hub.startHeartbeatMonitor();
 
