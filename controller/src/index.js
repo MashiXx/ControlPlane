@@ -11,6 +11,7 @@ import { initPool, closePool } from './db/pool.js';
 import { buildHttpApp } from './api/server.js';
 import { WsHub } from './ws/hub.js';
 import { startWorkers } from './workers/jobWorker.js';
+import { startBot } from './bot/start.js';
 
 const logger = createLogger({ service: 'controller' });
 const config = loadControllerConfig();
@@ -40,6 +41,9 @@ const workers = startWorkers({
   config,
 });
 
+const botLogger = createLogger({ service: 'bot' });
+const bot = startBot({ logger: botLogger });
+
 httpServer.listen(config.port, config.host, () => {
   logger.info({ host: config.host, port: config.port }, 'controller:listening');
 });
@@ -49,6 +53,7 @@ const shutdown = async (signal) => {
   try {
     httpServer.close();
     hub.stop();
+    await bot.stop();
     await Promise.all(workers.map((w) => w.close().catch(() => {})));
     await closeQueues();
     await closePool();
