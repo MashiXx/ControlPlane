@@ -176,6 +176,90 @@ export const jobs = {
   },
 };
 
+// ─── artifacts ──────────────────────────────────────────────────────────
+export const artifacts = {
+  async insert(row, c) {
+    const [res] = await conn(c).execute(
+      `INSERT INTO artifacts
+         (application_id, commit_sha, branch, config_hash, sha256, path,
+          size_bytes, build_job_id)
+       VALUES
+         (:applicationId, :commitSha, :branch, :configHash, :sha256, :path,
+          :sizeBytes, :buildJobId)
+       ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)`,
+      {
+        applicationId: row.applicationId,
+        commitSha:     row.commitSha ?? null,
+        branch:        row.branch,
+        configHash:    row.configHash,
+        sha256:        row.sha256,
+        path:          row.path,
+        sizeBytes:     row.sizeBytes,
+        buildJobId:    row.buildJobId,
+      },
+    );
+    return res.insertId;
+  },
+  async get(id, c) {
+    const [rows] = await conn(c).execute(
+      'SELECT * FROM artifacts WHERE id = :id LIMIT 1', { id },
+    );
+    if (!rows[0]) throw new NotFoundError('artifact', id);
+    return rows[0];
+  },
+  async findByCommitAndConfig(applicationId, commitSha, configHash, c) {
+    const [rows] = await conn(c).execute(
+      `SELECT * FROM artifacts
+       WHERE application_id = :applicationId
+         AND commit_sha = :commitSha
+         AND config_hash = :configHash
+       ORDER BY id DESC LIMIT 1`,
+      { applicationId, commitSha, configHash },
+    );
+    return rows[0] ?? null;
+  },
+  async listForApp(applicationId, limit = 20, c) {
+    const [rows] = await conn(c).query(
+      'SELECT * FROM artifacts WHERE application_id = ? ORDER BY id DESC LIMIT ?',
+      [applicationId, limit],
+    );
+    return rows;
+  },
+};
+
+// ─── deployments ────────────────────────────────────────────────────────
+export const deployments = {
+  async insert(row, c) {
+    const [res] = await conn(c).execute(
+      `INSERT INTO deployments
+         (application_id, job_id, commit_sha, branch, artifact_id, release_id, status)
+       VALUES
+         (:applicationId, :jobId, :commitSha, :branch, :artifactId, :releaseId, :status)`,
+      {
+        applicationId: row.applicationId,
+        jobId:         row.jobId,
+        commitSha:     row.commitSha ?? null,
+        branch:        row.branch,
+        artifactId:    row.artifactId ?? null,
+        releaseId:     row.releaseId ?? null,
+        status:        row.status ?? 'pending',
+      },
+    );
+    return res.insertId;
+  },
+  async markDeployed(id, c) {
+    await conn(c).execute(
+      `UPDATE deployments SET status='deployed', deployed_at=CURRENT_TIMESTAMP
+       WHERE id = :id`, { id },
+    );
+  },
+  async markFailed(id, c) {
+    await conn(c).execute(
+      `UPDATE deployments SET status='failed' WHERE id = :id`, { id },
+    );
+  },
+};
+
 // ─── audit ──────────────────────────────────────────────────────────────
 export const audit = {
   async write(row, c) {

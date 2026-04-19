@@ -6,6 +6,7 @@
 
 import { enqueueAction, enqueueGroupAction } from '@cp/queue';
 import {
+  BuildStrategy,
   JobAction, JobActions, JobTargetType, ProcessState, RetryProfile,
 } from '@cp/shared/constants';
 import { NotFoundError, ValidationError } from '@cp/shared/errors';
@@ -52,6 +53,14 @@ async function enqueueOne(action, app, triggeredBy, options) {
   }
   if (!app.enabled) throw new ValidationError(`app ${app.name} is disabled`);
 
+  // Special-case: deploy on an app that builds on controller is two-phase:
+  //   1. BUILD job (runs locally on controller)
+  //   2. DEPLOY job (enqueued by the build worker on success)
+  // We only enqueue the BUILD here; the chain is driven by the worker.
+  if (action === JobAction.DEPLOY && app.build_strategy === BuildStrategy.CONTROLLER) {
+    return enqueueControllerBuild(app, triggeredBy, options);
+  }
+
   const profile = RetryProfile[action];
   const enq = await enqueueAction({
     action,
@@ -73,7 +82,6 @@ async function enqueueOne(action, app, triggeredBy, options) {
     triggeredBy,
     payload: { appName: app.name, options },
   }).catch(async (err) => {
-    // Duplicate idempotency key => another concurrent caller won. That's OK.
     if (err?.code === 'ER_DUP_ENTRY') return null;
     throw err;
   });
@@ -88,6 +96,54 @@ async function enqueueOne(action, app, triggeredBy, options) {
     queueJobId: enq.queueJobId,
     application: { id: app.id, name: app.name },
     action,
+  };
+}
+
+async function enqueueControllerBuild(app, triggeredBy, options) {
+  const profile = RetryProfile[JobAction.BUILD];
+  const enq = await enqueueAction({
+    action: JobAction.BUILD,
+    targetType: JobTargetType.APP,
+    targetId: app.id,
+    triggeredBy,
+    payload: {
+      appName: app.name,
+      serverId: app.server_id,
+      buildOnController: true,    // processor branches on this
+      commitSha: options?.commitSha,
+      options,
+    },
+  });
+
+  const jobId = await jobsRepo.insert({
+    queueJobId: enq.queueJobId,
+    idempotencyKey: enq.idempotencyKey,
+    action: JobAction.BUILD,
+    targetType: JobTargetType.APP,
+    applicationId: app.id,
+    groupId: app.group_id,
+    serverId: app.server_id,
+    maxAttempts: profile.attempts,
+    triggeredBy,
+    payload: { buildOnController: true, options },
+  }).catch((err) => {
+    if (err?.code === 'ER_DUP_ENTRY') return null;
+    throw err;
+  });
+
+  await writeAudit({
+    actor: triggeredBy, action: 'deploy.plan', targetType: 'app', targetId: String(app.id),
+    jobId, result: 'info',
+    message: `build-then-deploy for ${app.name} (build_strategy=controller)`,
+  });
+
+  return {
+    jobId,
+    queueJobId: enq.queueJobId,
+    application: { id: app.id, name: app.name },
+    action: JobAction.DEPLOY,
+    twoPhase: true,
+    phase: 'build',
   };
 }
 

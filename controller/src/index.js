@@ -17,7 +17,11 @@ const config = loadControllerConfig();
 
 initPool(config.db);
 
-const app = buildHttpApp({ apiTokens: config.apiTokens });
+const app = buildHttpApp({
+  apiTokens: config.apiTokens,
+  artifactSecret: config.artifactSecret,
+  publicBaseUrl: config.publicBaseUrl,
+});
 const httpServer = http.createServer(app);
 
 const hub = new WsHub({
@@ -29,6 +33,7 @@ hub.startHeartbeatMonitor();
 const workers = startWorkers({
   hub,
   dispatchTimeoutMs: config.jobDispatchTimeoutMs,
+  config,
 });
 
 httpServer.listen(config.port, config.host, () => {

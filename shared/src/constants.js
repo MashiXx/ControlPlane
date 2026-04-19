@@ -46,6 +46,30 @@ export const Runtime = Object.freeze({
   JAVA: 'java',
 });
 
+export const BuildStrategy = Object.freeze({
+  TARGET:     'target',      // build on target server (agent)
+  CONTROLLER: 'controller',  // build on controller host, copy artifact to target
+  BUILDER:    'builder',     // future: dedicated builder pool
+});
+
+export const LaunchMode = Object.freeze({
+  WRAPPED: 'wrapped',
+  RAW:     'raw',
+  PM2:     'pm2',
+  SYSTEMD: 'systemd',
+});
+
+export const ArtifactTransfer = Object.freeze({
+  HTTP:  'http',   // agent pulls from controller
+  RSYNC: 'rsync',  // controller pushes via rsync+ssh
+});
+
+// How many releases to retain on target (older ones gc'd).
+export const RELEASE_RETENTION_COUNT = 5;
+
+// Short-lived token for artifact download URLs.
+export const ARTIFACT_TOKEN_TTL_SEC = 5 * 60;
+
 // Named BullMQ queues. Separate queues so a slow build never starves restarts.
 export const QueueName = Object.freeze({
   RESTART: 'cp:restart',

@@ -67,6 +67,69 @@ All actions are queued, retried with backoff, and audited to a database.
 7. All subscribed WS clients (web dashboard) see the status change in
    real-time; the bot polls `GET /api/jobs/:id` until terminal.
 
+### Build-once-deploy-many (`build_strategy`)
+
+Each application declares **where** it is built via
+`applications.build_strategy`:
+
+- `target` (default, legacy) — the agent on the target server does the
+  full pull + install + build + restart in-place.
+- `controller` — the controller host clones, builds, packs a content-
+  addressed `tar.gz` artifact under `ARTIFACT_STORE_DIR/<appId>/<sha256>.tar.gz`,
+  then copies the artifact to the target(s) and the agent just stages it
+  into `<remote_install_path>/releases/<release_id>/`, swaps the
+  `current` symlink atomically, and restarts. Target servers don't need
+  Maven/JDK/Node build toolchain — only the runtime.
+- `builder` — reserved for a future dedicated builder pool.
+
+Artifacts are **deduped** by `(application_id, sha256)` and by
+`(application_id, commit_sha, config_hash)` where `config_hash` is the
+sha256 of `install_cmd | build_cmd | artifact_pattern` — rebuilding is
+skipped if the same commit with the same build config already produced
+an artifact.
+
+### Artifact transfer (`servers.artifact_transfer`)
+
+Per-server choice of how artifacts reach the target:
+
+- `http` (default) — the agent pulls via a signed, short-lived URL
+  against the controller's `GET /artifacts/:id/blob?token=…` endpoint.
+  Token is HMAC-signed with `ARTIFACT_SIGNING_SECRET` (independent from
+  the API token, rotatable). Works through the existing WS agent.
+- `rsync` — the controller pushes the unpacked artifact to the target
+  over `rsync -e ssh` directly into `<remote_install_path>/releases/<id>/`,
+  using the SSH config on the `servers` row. The agent receives a
+  `prestagedPath` reference and skips the download. Useful when the
+  target has no outbound connectivity to the controller, or for
+  incremental delta transfer on large artifacts.
+
+Atomic release swap on the target:
+
+```
+<remote_install_path>/
+  releases/
+    1713400000-abc1234/   ← just-staged
+    1713300000-def5678/   ← previous (kept for rollback)
+  current → releases/1713400000-abc1234   (symlink, atomically renamed)
+```
+
+Retention keeps the most recent `RELEASE_RETENTION_COUNT` releases;
+older directories are garbage-collected.
+
+### Launch mode (`launch_mode`)
+
+How `start`/`stop`/`status` actually run on the target:
+
+- `wrapped` (default) — you write only `start_cmd`; the agent wraps it
+  in `setsid nohup … & echo $! > .cp/pid`, which survives SSH
+  disconnect. Stop/status are synthesized from the PID file with
+  SIGTERM → SIGKILL grace.
+- `raw` — you provide all of `start_cmd`, `stop_cmd`, `status_cmd`, and
+  optionally `logs_cmd`. Contract: `start_cmd` must self-detach;
+  `stop_cmd` must be idempotent; `status_cmd` exits 0 iff running.
+  Use this for `mvn exec:java`, `pm2`, custom scripts, etc.
+- `pm2`, `systemd` — reserved shortcuts for future wiring.
+
 ### Reliability model
 
 - **Every action** is a BullMQ job. No action bypasses the queue.

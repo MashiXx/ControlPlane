@@ -9,6 +9,9 @@ import {
   ProcessState,
   Runtime,
   WsOp,
+  BuildStrategy,
+  LaunchMode,
+  ArtifactTransfer,
 } from './constants.js';
 
 // ─── Primitive building blocks ───────────────────────────────────────────
@@ -24,6 +27,12 @@ export const ApplicationConfig = z.object({
   serverName: identifier,
   groupName: identifier.optional(),
   runtime: z.enum([Runtime.NODE, Runtime.JAVA]),
+
+  buildStrategy: z.enum(Object.values(BuildStrategy)).default(BuildStrategy.TARGET),
+  artifactPattern: z.string().max(255).optional(),       // 'target/*.jar'
+  remoteInstallPath: z.string().max(512).optional(),     // '/opt/ledger'
+  builderServerName: identifier.optional(),
+
   repoUrl: z.string().url().optional(),
   branch: nonEmpty.max(128).default('main'),
   workdir: nonEmpty.max(512),
@@ -31,11 +40,49 @@ export const ApplicationConfig = z.object({
   buildCmd: z.string().max(512).optional(),
   startCmd: z.string().min(1).max(512),
   stopCmd: z.string().max(512).optional(),
+
+  launchMode: z.enum(Object.values(LaunchMode)).default(LaunchMode.WRAPPED),
+  statusCmd: z.string().max(512).optional(),
+  logsCmd:   z.string().max(512).optional(),
+
   healthCmd: z.string().max(512).optional(),
   env: z.record(z.string(), z.string()).optional(),
   trusted: z.boolean().default(false),
   enabled: z.boolean().default(true),
+})
+.superRefine((cfg, ctx) => {
+  if (cfg.launchMode === LaunchMode.RAW) {
+    for (const f of ['stopCmd', 'statusCmd']) {
+      if (!cfg[f]) ctx.addIssue({
+        code: z.ZodIssueCode.custom, path: [f],
+        message: `launchMode='raw' requires ${f}`,
+      });
+    }
+  }
+  if (cfg.buildStrategy === BuildStrategy.CONTROLLER) {
+    for (const f of ['repoUrl', 'artifactPattern', 'remoteInstallPath']) {
+      if (!cfg[f]) ctx.addIssue({
+        code: z.ZodIssueCode.custom, path: [f],
+        message: `buildStrategy='controller' requires ${f}`,
+      });
+    }
+  }
 });
+
+// ─── Artifact descriptor sent to the agent in a deploy execute frame ────
+export const ArtifactDescriptor = z.object({
+  id:        z.number().int().positive(),
+  sha256:    z.string().length(64),
+  sizeBytes: z.number().int().nonnegative(),
+  // Either `downloadUrl` (HTTP pull mode) or `prestagedPath` (rsync push mode).
+  downloadUrl:   z.string().url().optional(),
+  downloadToken: z.string().min(10).optional(),
+  prestagedPath: z.string().optional(),
+  releaseId:     z.string().min(1),
+}).refine(
+  (a) => Boolean(a.downloadUrl || a.prestagedPath),
+  { message: 'artifact requires either downloadUrl or prestagedPath' },
+);
 
 // ─── API: enqueue an action ──────────────────────────────────────────────
 export const EnqueueActionBody = z.object({
@@ -93,12 +140,19 @@ export const WsExecute = WsBase.extend({
     buildCmd: z.string().optional(),
     startCmd: z.string(),
     stopCmd: z.string().optional(),
+    statusCmd: z.string().optional(),
+    logsCmd:   z.string().optional(),
+    launchMode: z.enum(Object.values(LaunchMode)).default(LaunchMode.WRAPPED),
     healthCmd: z.string().optional(),
     repoUrl: z.string().url().optional(),
     branch: nonEmpty.default('main'),
     env: z.record(z.string(), z.string()).optional(),
     trusted: z.boolean().default(false),
+    buildStrategy: z.enum(Object.values(BuildStrategy)).default(BuildStrategy.TARGET),
+    remoteInstallPath: z.string().optional(),
   }),
+  // Populated when action=deploy and build_strategy != 'target'.
+  artifact: ArtifactDescriptor.optional(),
   timeoutMs: z.number().int().positive().max(60 * 60 * 1000).optional(),
 });
 
