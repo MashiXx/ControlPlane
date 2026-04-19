@@ -23,11 +23,12 @@ All actions are queued, retried with backoff, and audited to a database.
  └─────────────┘              │                  │      │  audit)    │
                               │  - REST / WS API │      └────────────┘
                               │  - Orchestrator  │
-                              │  - Job Worker    │      ┌────────────┐
-                              │  - Audit Sink    │◄────►│  Redis     │
-                              └──┬─────────────┬─┘      │ (BullMQ)   │
-                                 │             │        └────────────┘
-                     WebSocket   │             │  BullMQ jobs
+                              │  - Job Worker    │
+                              │  - In-proc Queue │
+                              │  - Audit Sink    │
+                              └──┬─────────────┬─┘
+                                 │             │
+                     WebSocket   │             │
                     (bidir, hb)  │             │
                   ┌──────────────┘             └──────────────┐
                   ▼                                           ▼
@@ -45,9 +46,9 @@ All actions are queued, retried with backoff, and audited to a database.
 
 | Component    | Path           | Responsibility                                               |
 | ------------ | -------------- | ------------------------------------------------------------ |
-| `controller` | `/controller`  | REST + WS API, orchestrator, BullMQ worker, audit sink.      |
+| `controller` | `/controller`  | REST + WS API, orchestrator, in-process job worker, audit sink. |
 | `agent`      | `/agent`       | Runs on each target server. Executes whitelisted commands.   |
-| `queue`      | `/queue`       | BullMQ queue/producer/worker primitives shared by everyone.  |
+| `queue`      | `/queue`       | In-process queue/producer/worker primitives shared by everyone. |
 | `bot`        | `/bot`         | Telegram bot → Controller API. No direct agent access.       |
 | `web`        | `/web`         | Static SPA + WS client for dashboards and actions.           |
 | `shared`     | `/shared`      | Constants, logger, error classes, zod schemas, DB types.     |
@@ -58,9 +59,9 @@ All actions are queued, retried with backoff, and audited to a database.
 1. User sends `/restart payment` to the bot.
 2. Bot calls `POST /api/groups/payment/actions/restart` with its API token.
 3. Controller validates RBAC, writes an `audit_logs` row (`queued`), and
-   enqueues one BullMQ job **per application** in the group.
-4. The BullMQ worker pops each job, resolves the target server, and sends a
-   typed `execute` frame over the agent's WebSocket connection.
+   enqueues one in-process job **per application** in the group.
+4. The in-process worker pops each job, resolves the target server, and sends
+   a typed `execute` frame over the agent's WebSocket connection.
 5. The agent runs the whitelisted command, streams stdout/stderr back, and
    emits `job:update` events.
 6. Worker records the final result in `jobs` + appends output to `audit_logs`.
@@ -132,7 +133,7 @@ How `start`/`stop`/`status` actually run on the target:
 
 ### Reliability model
 
-- **Every action** is a BullMQ job. No action bypasses the queue.
+- **Every action** is a queued job. No action bypasses the queue.
 - Jobs are **retried on transient failures only** (see
   `shared/src/errors.js` — `TransientError` vs `PermanentError`).
   Config/syntax errors fail fast.
@@ -158,9 +159,9 @@ How `start`/`stop`/`status` actually run on the target:
 
 ```
 /
-├── controller/      REST + WS + orchestrator + BullMQ worker
+├── controller/      REST + WS + orchestrator + in-process worker
 ├── agent/           Per-server executor + WS client
-├── queue/           BullMQ wrappers (queues, producers, job schemas)
+├── queue/           In-process queues, producers, job schemas
 ├── bot/             Telegram bot (thin client over Controller API)
 ├── web/             Static SPA + WS client
 ├── shared/          Constants, logger, errors, zod schemas
@@ -169,7 +170,7 @@ How `start`/`stop`/`status` actually run on the target:
 │   └── migrations/
 ├── examples/
 │   └── apps.example.json
-├── docker-compose.yml   MySQL 8 + Redis 7 for local dev
+├── docker-compose.yml   MySQL 8 for local dev
 ├── .env.example
 └── package.json     npm workspaces
 ```
@@ -180,7 +181,7 @@ How `start`/`stop`/`status` actually run on the target:
 
 ```bash
 cp .env.example .env
-docker compose up -d            # MySQL + Redis
+docker compose up -d            # MySQL
 npm install                     # installs all workspaces
 npm run db:init                 # applies db/schema.sql
 npm run dev:controller          # starts controller

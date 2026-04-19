@@ -158,7 +158,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
 -- ─────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS jobs (
   id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  -- BullMQ job id (string). Unique so the worker and API can dedupe.
+  -- In-process queue job id (string). Unique so the worker and API can dedupe.
   queue_job_id    VARCHAR(64)   NOT NULL,
   -- Parent job, used when a group action fans out into N per-app jobs.
   parent_job_id   BIGINT UNSIGNED NULL,

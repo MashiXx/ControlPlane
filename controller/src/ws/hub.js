@@ -5,11 +5,11 @@
 //   - accept browser UI WS connections on /ui (no auth in this step; gated
 //     at the HTTP layer by a session cookie / api token in production)
 //   - track agent sessions keyed by serverId
-//   - expose executeAndWait(serverId, frame) used by the BullMQ worker
+//   - expose executeAndWait(serverId, frame) used by the in-process worker
 //   - broadcast job updates + state snapshots to subscribed UI clients
 //
 // Reliability: on agent disconnect, all pending dispatches for that
-// server are rejected with TransientError → BullMQ will retry.
+// server are rejected with TransientError → the queue will retry.
 
 import { WebSocketServer } from 'ws';
 import { WsOp, HEARTBEAT_MISS_LIMIT } from '@cp/shared/constants';
@@ -169,7 +169,7 @@ export class WsHub {
     await servers.updateStatus(session.server.id, 'offline').catch(() => {});
     logger.info({ serverId: session.server.id }, 'agent:disconnected');
 
-    // Reject all in-flight jobs for this server so BullMQ retries.
+    // Reject all in-flight jobs for this server so the queue retries.
     for (const [jobId, pending] of this.pendingJobs) {
       if (pending.serverId !== session.server.id) continue;
       clearTimeout(pending.timer);

@@ -1,4 +1,4 @@
-// BullMQ worker that processes queued actions.
+// In-process worker that processes queued actions.
 //
 // Three branches per job, selected from job.data:
 //
@@ -14,8 +14,8 @@
 //
 // Shared semantics:
 //   - Mark `jobs` row running on entry, final state on exit.
-//   - Agent-unavailable bubbles as TransientError → BullMQ retries once the
-//     agent reconnects.
+//   - Agent-unavailable bubbles as TransientError → the queue retries once
+//     the agent reconnects.
 //   - Permanent errors (wrapped upstream by createWorker) fail the job.
 
 import { createWorker, enqueueAction } from '@cp/queue';

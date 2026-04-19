@@ -1,12 +1,12 @@
-// Enqueues actions onto the correct BullMQ queue.
+// Enqueues actions onto the correct in-process queue.
 //
 // Every enqueue derives:
 //   - queue name          from QueueForAction[action]
 //   - retry profile       from RetryProfile[action]
 //   - idempotency key     from (action, targetType, targetId, IDEMPOTENCY_WINDOW_MS)
 //
-// BullMQ treats `jobId` as a uniqueness key inside a queue: if a job with the
-// same id already exists (waiting/active/delayed), the producer returns that
+// The queue treats `jobId` as a uniqueness key: if a job with the same id
+// already exists (waiting/active/delayed/retained), the producer returns that
 // existing job instead of creating a duplicate. We piggy-back on that to
 // implement "same action on same target within a short window = same job".
 
@@ -31,7 +31,7 @@ import { getQueue } from './queues.js';
  * @property {Object}   [payload]       // action-specific payload
  * @property {number}   [attemptsOverride]
  * @property {number}   [delayMs]
- * @property {string}   [parentJobId]   // BullMQ id of the parent (group fan-out)
+ * @property {string}   [parentJobId]   // queue job id of the parent (group fan-out)
  */
 
 export async function enqueueAction(input) {
@@ -67,7 +67,7 @@ export async function enqueueAction(input) {
       attempts,
       backoff,
       delay: delayMs,
-      // Keep payload small; full stdout goes to DB audit, not Redis.
+      // Keep payload small; full stdout goes to DB audit, not the in-memory queue.
       removeOnComplete: { age: 3600, count: 500 },
       removeOnFail:     { age: 7 * 24 * 3600 },
     },

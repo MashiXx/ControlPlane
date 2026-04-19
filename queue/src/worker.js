@@ -1,83 +1,121 @@
-// BullMQ worker factory.
+// Worker factory for the in-process queue.
 //
-// Key behaviors:
-//   - Worker code is provided by the caller (controller) as a `processor`
-//     function receiving (job, context). The queue module stays agnostic
-//     of business logic.
-//   - Transient errors are re-thrown so BullMQ retries with backoff.
-//   - Permanent errors are wrapped in BullMQ's UnrecoverableError so the
-//     job fails immediately without burning retries.
-//   - Every outcome is logged with a stable structured shape.
+// Responsibilities:
+//   - Pop jobs from a queue respecting a per-worker concurrency limit.
+//   - Invoke the caller-supplied `processor(job, ctx)`.
+//   - Retry transient failures with the job's configured backoff.
+//   - Treat UnrecoverableError (or err.transient === false) as permanent.
+//   - Log every outcome with a stable structured shape.
 
-import { Worker, UnrecoverableError } from 'bullmq';
+import { EventEmitter } from 'node:events';
 import { createLogger } from '@cp/shared/logger';
 import { ControlPlaneError, serializeError } from '@cp/shared/errors';
-import { getConnection } from './connection.js';
+import { getQueue, computeBackoffMs, UnrecoverableError } from './queues.js';
 
 /**
  * @param {string}   queueName
  * @param {(job, ctx) => Promise<any>} processor
  * @param {object}   [opts]
  * @param {number}   [opts.concurrency]
- * @param {object}   [opts.context]      // passed verbatim to processor
- * @returns {Worker}
+ * @param {object}   [opts.context]       // passed verbatim to processor
+ * @returns {InMemoryWorker}
  */
 export function createWorker(queueName, processor, opts = {}) {
-  const logger = createLogger({ service: 'queue.worker', queue: queueName });
-  const concurrency = opts.concurrency ?? Number(process.env.WORKER_CONCURRENCY ?? 4);
+  return new InMemoryWorker(queueName, processor, opts);
+}
 
-  const worker = new Worker(
-    queueName,
-    async (job) => {
-      const started = Date.now();
-      const base = { queueJobId: job.id, action: job.data?.action, attempt: job.attemptsMade + 1 };
-      logger.info({ ...base, data: redactPayload(job.data) }, 'job:start');
+class InMemoryWorker extends EventEmitter {
+  constructor(queueName, processor, opts = {}) {
+    super();
+    this.queue = getQueue(queueName);
+    this.processor = processor;
+    this.concurrency = opts.concurrency ?? Number(process.env.WORKER_CONCURRENCY ?? 4);
+    this.context = opts.context ?? {};
+    this.logger = createLogger({ service: 'queue.worker', queue: queueName });
 
+    this._running = 0;
+    this._inflight = new Set();
+    this._closed = false;
+
+    this.queue._registerWorker(this);
+    // Let the caller finish wiring before we start draining.
+    queueMicrotask(() => this._tryDrain());
+  }
+
+  async close() {
+    this._closed = true;
+    this.queue._unregisterWorker(this);
+    await Promise.allSettled(this._inflight);
+  }
+
+  _tryDrain() {
+    if (this._closed) return;
+    while (this._running < this.concurrency) {
+      const job = this.queue._takeOne();
+      if (!job) return;
+      this._run(job);
+    }
+  }
+
+  _run(job) {
+    this._running++;
+    this.queue.active.add(job);
+    job.processedOn = Date.now();
+    job.attemptsMade += 1;
+
+    const base = { queueJobId: job.id, action: job.data?.action, attempt: job.attemptsMade };
+    this.logger.info({ ...base, data: redactPayload(job.data) }, 'job:start');
+
+    const p = (async () => {
+      const startedAt = Date.now();
       try {
-        const result = await processor(job, opts.context ?? {});
-        logger.info({ ...base, durationMs: Date.now() - started }, 'job:success');
-        return result;
+        const result = await this.processor(job, this.context);
+        job.returnvalue = result;
+        this.queue._settle(job, 'completed');
+        this.logger.info({ ...base, durationMs: Date.now() - startedAt }, 'job:success');
+        return;
       } catch (err) {
-        const durationMs = Date.now() - started;
+        const durationMs = Date.now() - startedAt;
         const serialized = serializeError(err);
         const transient = err instanceof ControlPlaneError ? err.transient : undefined;
+        const permanent = err instanceof UnrecoverableError || transient === false;
 
-        if (transient === false) {
-          // Known permanent error — don't retry.
-          logger.error({ ...base, durationMs, err: serialized }, 'job:permanent-failure');
-          throw new UnrecoverableError(err.message || 'permanent error');
+        const maxAttempts = job.opts.attempts ?? 1;
+        const canRetry = !permanent && job.attemptsMade < maxAttempts;
+
+        if (!canRetry) {
+          this.logger.error(
+            { ...base, durationMs, err: serialized },
+            permanent ? 'job:permanent-failure' : 'job:failure',
+          );
+          this.queue._settle(job, 'failed', err);
+          this.emit('failed', job, err);
+          return;
         }
 
-        // Last attempt? Log as final failure. Otherwise BullMQ will retry.
-        const willRetry = job.attemptsMade + 1 < (job.opts?.attempts ?? 1);
-        logger.warn({ ...base, durationMs, willRetry, err: serialized }, 'job:failure');
-        throw err;
+        // Retry: leave the job registered in byId (so concurrent dedup still
+        // works) and push it back through the delayed bucket.
+        this.queue.active.delete(job);
+        const delay = computeBackoffMs(job);
+        this.logger.warn(
+          { ...base, durationMs, willRetry: true, retryInMs: delay, err: serialized },
+          'job:failure',
+        );
+        this.queue._scheduleDelayed(job, delay);
       }
-    },
-    {
-      connection: getConnection(),
-      prefix: process.env.QUEUE_PREFIX ?? 'cp',
-      concurrency,
-      // One lock per job; extended automatically while the processor runs.
-      lockDuration: 60_000,
-      stalledInterval: 15_000,
-    },
-  );
+    })().catch((err) => {
+      // Defensive: processor throwing synchronously after settle shouldn't
+      // crash the worker loop.
+      this.logger.error({ err: serializeError(err) }, 'worker:internal-error');
+      this.emit('error', err);
+    }).finally(() => {
+      this._running--;
+      this._inflight.delete(p);
+      if (!this._closed) this._tryDrain();
+    });
 
-  worker.on('error', (err) => {
-    logger.error({ err: serializeError(err) }, 'worker:error');
-  });
-  worker.on('failed', (job, err) => {
-    logger.warn(
-      { queueJobId: job?.id, err: serializeError(err) },
-      'worker:job-failed-event',
-    );
-  });
-  worker.on('stalled', (jobId) => {
-    logger.warn({ queueJobId: jobId }, 'worker:job-stalled');
-  });
-
-  return worker;
+    this._inflight.add(p);
+  }
 }
 
 function redactPayload(data) {

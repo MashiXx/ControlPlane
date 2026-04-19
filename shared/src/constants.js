@@ -70,7 +70,7 @@ export const RELEASE_RETENTION_COUNT = 5;
 // Short-lived token for artifact download URLs.
 export const ARTIFACT_TOKEN_TTL_SEC = 5 * 60;
 
-// Named BullMQ queues. Separate queues so a slow build never starves restarts.
+// Named in-process queues. Separate queues so a slow build never starves restarts.
 export const QueueName = Object.freeze({
   RESTART: 'cp:restart',
   BUILD:   'cp:build',
