@@ -24,13 +24,15 @@ export function issueSessionToken(secret, { ttlSeconds = SESSION_TTL_SECONDS } =
 
 /** Returns { ok: true, exp } or { ok: false, reason }. */
 export function verifySessionToken(secret, signedValue) {
-  if (!signedValue) return { ok: false, reason: 'missing' };
-  const payload = cookieSignature.unsign(signedValue, secret);
+  if (!signedValue || typeof signedValue !== 'string') return { ok: false, reason: 'missing' };
+  let payload;
+  try { payload = cookieSignature.unsign(signedValue, secret); }
+  catch { return { ok: false, reason: 'bad-signature' }; }
   if (payload === false) return { ok: false, reason: 'bad-signature' };
   let parsed;
   try { parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')); }
   catch { return { ok: false, reason: 'bad-payload' }; }
-  if (typeof parsed?.exp !== 'number') return { ok: false, reason: 'bad-payload' };
+  if (typeof parsed?.exp !== 'number' || !Number.isFinite(parsed.exp)) return { ok: false, reason: 'bad-payload' };
   if (parsed.exp < Math.floor(Date.now() / 1000)) return { ok: false, reason: 'expired' };
   return { ok: true, exp: parsed.exp };
 }
