@@ -1,9 +1,23 @@
 export function loadControllerConfig() {
+  // When the dashboard is enabled (password hash present), the cookie-signing
+  // secret must be a real, sufficiently long secret — otherwise sessions are
+  // signed with the placeholder default and can be trivially forged.
+  if (process.env.DASHBOARD_PASSWORD_HASH) {
+    const secret = process.env.CONTROLLER_JWT_SECRET ?? '';
+    if (!secret || secret === 'change-me' || secret === 'change-me-in-prod' || secret.length < 32) {
+      throw new Error(
+        'CONTROLLER_JWT_SECRET must be set to a non-default value of at least 32 characters when DASHBOARD_PASSWORD_HASH is set'
+      );
+    }
+  }
+
   return {
     host: process.env.CONTROLLER_HOST ?? '0.0.0.0',
     port: Number(process.env.CONTROLLER_PORT ?? 8080),
     jwtSecret: process.env.CONTROLLER_JWT_SECRET ?? 'change-me',
     apiTokens: parseApiTokens(process.env.CONTROLLER_API_TOKENS ?? ''),
+    dashboardPasswordHash: process.env.DASHBOARD_PASSWORD_HASH ?? '',
+    isProd: process.env.NODE_ENV === 'production',
     db: {
       host: process.env.DB_HOST ?? '127.0.0.1',
       port: Number(process.env.DB_PORT ?? 3306),
