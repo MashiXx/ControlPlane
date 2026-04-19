@@ -2,8 +2,8 @@
 //
 // Responsibilities:
 //   - accept agent WS connections on /agent, authenticate via HELLO
-//   - accept browser UI WS connections on /ui (no auth in this step; gated
-//     at the HTTP layer by a session cookie / api token in production)
+//   - accept browser UI WS connections on /ui, gated by the cp_session
+//     cookie (verified against the same secret used by /auth/login)
 //   - track agent sessions keyed by serverId
 //   - expose executeAndWait(serverId, frame) used by the in-process worker
 //   - broadcast job updates + state snapshots to subscribed UI clients
