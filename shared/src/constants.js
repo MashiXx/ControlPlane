@@ -1,4 +1,4 @@
-// Enumerations & constants shared across controller, agent, queue, bot, web.
+// Enumerations & constants shared across controller, agent, and queue.
 // Keep these aligned with the ENUM columns in db/schema.sql.
 
 export const JobAction = Object.freeze({

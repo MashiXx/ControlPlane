@@ -1,4 +1,6 @@
-// Controller entrypoint: wires DB pool, HTTP server, WS hub, and job workers.
+// Controller entrypoint: wires DB pool, HTTP server (REST + cookie-session
+// auth + SPA static), WS hub (/agent + /ui), in-process job workers, and
+// the in-process Telegram bot (started only when TELEGRAM_TOKEN is set).
 
 import http from 'node:http';
 import { createLogger } from '@cp/shared/logger';

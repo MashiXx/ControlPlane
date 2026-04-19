@@ -1,6 +1,8 @@
-// In-process replacement for bot/src/controllerClient.js.
-// Same method names; enqueue() returns { accepted, jobs } directly from
-// the orchestrator (matches what fmtEnqueueResult expects in format.js).
+// Adapter the in-process Telegram bot uses to talk to the controller.
+// Reads go straight to the repositories; enqueue() goes through the
+// orchestrator's submitAction (the single chokepoint for state-changing
+// actions, same as REST). Returns { accepted, jobs } so format.js's
+// fmtEnqueueResult keeps working.
 
 import { applications, groups, servers, jobs as jobsRepo } from '../db/repositories.js';
 import { submitAction } from '../orchestrator/orchestrator.js';
