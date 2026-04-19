@@ -4,18 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Common commands
 
-All services share a single root `.env` (each workspace's `dev` script runs `node --env-file=../.env`). Copy `.env.example` first.
+All services share a single root `.env` (each workspace's `dev` script runs `node --env-file=../.env`). Copy `.env.example` first and set `DASHBOARD_PASSWORD_HASH`.
 
 ```bash
 cp .env.example .env
+echo -n 'your-password' | npm run dashboard:hash --silent   # paste into .env
 docker compose up -d         # MySQL 8 (auto-applies db/schema.sql on first boot)
-npm install                  # installs all workspaces (root uses npm workspaces)
+npm install
 npm run db:init              # re-apply db/schema.sql to an existing DB
 
-npm run dev:controller       # REST + WS hub + in-process worker (port 8080)
+npm run dev:controller       # REST + WS hub + workers + SPA + Telegram bot (if TELEGRAM_TOKEN set)
 npm run dev:agent            # local agent that connects back to the controller
-npm run dev:bot              # Telegram bot (needs TELEGRAM_TOKEN)
-npm run dev:web              # SPA + API-proxy (port 8081)
 ```
 
 There is no test runner or linter wired up yet (`npm test` / `npm run lint` are placeholders). Migrations under `db/migrations/` are **not** applied by `db:init` — apply them manually against the running DB.
@@ -24,13 +23,13 @@ There is no test runner or linter wired up yet (`npm test` / `npm run lint` are 
 
 npm workspaces under internal scope `@cp/*`. ESM (`"type": "module"`), Node ≥20.
 
-- `controller/` — REST API, WS hub, orchestrator, in-process job worker, controller-side builder + artifact store.
+- `controller/` — REST API, WS hub, orchestrator, in-process job worker, controller-side builder + artifact store, dashboard SPA static (`controller/public/`), and in-process Telegram bot (`controller/src/bot/`).
 - `agent/` — runs on each target server, holds the WS to the controller, executes whitelisted commands, manages process lifecycle.
-- `queue/` — in-process queue/producer/worker primitives. Surface mimics a subset of BullMQ (`getQueue(name).add(...)`, `createWorker(...)`).
-- `bot/` — Telegram bot, thin client over the controller REST API. No DB or agent access.
-- `web/` — static SPA + tiny Express server that proxies `/api/*` to the controller, injecting the bearer token server-side so the browser never holds it.
-- `shared/` — constants (enums), logger, error taxonomy, zod schemas, id helpers. Imported as `@cp/shared`, `@cp/shared/constants`, `@cp/shared/errors`, etc. (subpath exports declared in `shared/package.json`).
+- `queue/` — in-process queue/producer/worker primitives. Surface mimics a subset of BullMQ.
+- `shared/` — constants (enums), logger, error taxonomy, zod schemas, id helpers. Imported as `@cp/shared`, `@cp/shared/constants`, `@cp/shared/errors`, etc.
 - `db/` — `schema.sql` (full MySQL 8 schema, InnoDB + utf8mb4) and `migrations/`.
+
+The system runs as **two processes**: one `controller` (which hosts everything except the agent) and one `agent` per managed server.
 
 ## Architecture invariants
 
@@ -63,10 +62,17 @@ Artifacts are deduped by `(application_id, sha256)` AND by `(application_id, com
 
 `build_strategy = 'target'` (default, legacy) is the original single-step flow: agent does pull + install + build + restart in-place. Don't conflate the two code paths.
 
-## Web token handling
+## Dashboard auth
 
-The browser never holds an API token. `web/src/server.js` proxies `/api/*` to the controller and adds `Authorization: Bearer <token>` server-side using `WEB_CONTROLLER_TOKEN` (falls back to `TELEGRAM_CONTROLLER_TOKEN`). The browser does open a direct WS to the controller's `/ui` endpoint (currently unauthenticated; gated at the HTTP layer in production per the comment in `ws/hub.js`).
+The dashboard uses a single shared password (set as bcrypt hash in `DASHBOARD_PASSWORD_HASH`) and a signed session cookie (`cp_session`, signed with `CONTROLLER_JWT_SECRET`). Login flow:
+
+1. Browser POSTs `{ password }` to `/auth/login`.
+2. Controller verifies against the bcrypt hash and sets an `HttpOnly`, `SameSite=Lax` cookie. `Secure` is added when `NODE_ENV=production`.
+3. SPA calls `/api/*` with `credentials: 'same-origin'`. The `requireAuth` middleware accepts **either** `Authorization: Bearer <token>` (matching `CONTROLLER_API_TOKENS`, used by external scripts/CLI) **or** a valid `cp_session` cookie.
+4. WS `/ui` upgrade verifies the same cookie and rejects with HTTP 401 if missing or invalid.
+
+Generate a password hash with `echo -n 'your-password' | npm run dashboard:hash --silent` and paste into `.env`. When `DASHBOARD_PASSWORD_HASH` is set, the controller fails to boot if `CONTROLLER_JWT_SECRET` is left at the placeholder default or shorter than 32 chars.
 
 ## Telegram bot scope
 
-The bot is a thin REST client. It must not query the DB or talk to agents directly — every action goes through `POST /api/actions` and reads through `GET /api/jobs/:id` etc. `TELEGRAM_ADMIN_CHAT_IDS` gates destructive commands.
+The Telegram bot runs **in-process inside the controller** (started only when `TELEGRAM_TOKEN` is set). It calls the controller's repositories and orchestrator directly via [controller/src/bot/api.js](controller/src/bot/api.js) — no HTTP loopback, no bearer token. It must not query the DB outside those repositories or talk to agents directly: every action goes through `submitAction` (the orchestrator's single chokepoint, same as REST). `TELEGRAM_ADMIN_CHAT_IDS` gates destructive commands.
