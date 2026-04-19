@@ -1,5 +1,6 @@
 // In-process replacement for bot/src/controllerClient.js.
-// Same method names + return shapes — direct calls to repos + orchestrator.
+// Same method names; enqueue() returns { accepted, jobs } directly from
+// the orchestrator (matches what fmtEnqueueResult expects in format.js).
 
 import { applications, groups, servers, jobs as jobsRepo } from '../db/repositories.js';
 import { submitAction } from '../orchestrator/orchestrator.js';
