@@ -6,13 +6,10 @@
   "main": "src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./connection": "./src/connection.js",
     "./producer": "./src/producer.js",
     "./worker": "./src/worker.js"
   },
   "dependencies": {
-    "@cp/shared": "*",
-    "bullmq": "^5.12.0",
-    "ioredis": "^5.4.1"
+    "@cp/shared": "*"
   }
 }

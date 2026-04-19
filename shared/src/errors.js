@@ -16,7 +16,7 @@ export class ControlPlaneError extends Error {
   }
 }
 
-// Retryable: network blip, agent disconnected mid-job, redis timeout.
+// Retryable: network blip, agent disconnected mid-job, transient I/O.
 export class TransientError extends ControlPlaneError {
   constructor(message, opts = {}) {
     super(message, { code: opts.code ?? 'E_TRANSIENT', ...opts });

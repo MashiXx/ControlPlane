@@ -1,10 +1,10 @@
-// Controller entrypoint: wires DB pool, HTTP server, WS hub, and BullMQ workers.
+// Controller entrypoint: wires DB pool, HTTP server, WS hub, and job workers.
 
 import http from 'node:http';
 import { createLogger } from '@cp/shared/logger';
 import { HEARTBEAT_INTERVAL_MS } from '@cp/shared/constants';
 import { serializeError } from '@cp/shared/errors';
-import { closeAll as closeQueues, closeConnection as closeRedis } from '@cp/queue';
+import { closeAll as closeQueues } from '@cp/queue';
 
 import { loadControllerConfig } from './config.js';
 import { initPool, closePool } from './db/pool.js';
@@ -47,7 +47,6 @@ const shutdown = async (signal) => {
     hub.stop();
     await Promise.all(workers.map((w) => w.close().catch(() => {})));
     await closeQueues();
-    await closeRedis();
     await closePool();
   } catch (err) {
     logger.error({ err: err.message }, 'shutdown:error');

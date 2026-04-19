@@ -1,5 +1,5 @@
 // Orchestrator: takes a user-facing action request (from REST / bot / web),
-// validates the target, enqueues BullMQ job(s), writes the corresponding
+// validates the target, enqueues in-process job(s), writes the corresponding
 // rows into the `jobs` table, and records an audit entry.
 //
 // For group actions it fans out to one job per application in the group.
