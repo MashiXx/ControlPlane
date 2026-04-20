@@ -71,8 +71,10 @@ export function openApplicationForm({ initial, servers, groups, onSaved }) {
     </fieldset>
 
     <fieldset><legend>Git</legend>
-      <label>Repo URL
-        <input name="repo_url" type="url" maxlength="512" value="${escape(initial?.repo_url)}">
+      <label>Repo URL (https://…, ssh://…, or git@host:path)
+        <input name="repo_url" type="text" maxlength="512"
+               placeholder="git@github.com:org/repo.git"
+               value="${escape(initial?.repo_url)}">
       </label>
       <label>Branch
         <input name="branch" maxlength="128" value="${escape(initial?.branch ?? 'main')}">

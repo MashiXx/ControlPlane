@@ -21,6 +21,16 @@ const identifier = nonEmpty.max(64).regex(
   'must be alphanumeric with . _ -',
 );
 
+// Accept either a standard URL (http, https, ssh, git) OR the scp-style
+// SSH syntax git clone uses: `user@host:path` (most commonly
+// `git@github.com:org/repo.git`). z.string().url() rejects the scp form
+// because it has no `://`.
+const gitRepoUrl = z.string().trim().max(512).refine(
+  (s) => /^(https?|ssh|git):\/\//i.test(s)
+      || /^[\w.-]+@[\w.-]+:[\w./_-]+$/.test(s),
+  'must be http(s)://, ssh://, git://, or git@host:path',
+);
+
 // ─── Application config (used by POST /api/applications & example JSON) ──
 export const ApplicationConfig = z.object({
   name: identifier,
@@ -33,7 +43,7 @@ export const ApplicationConfig = z.object({
   remoteInstallPath: z.string().max(512).optional(),     // '/opt/ledger'
   builderServerName: identifier.optional(),
 
-  repoUrl: z.string().url().optional(),
+  repoUrl: gitRepoUrl.optional(),
   branch: nonEmpty.max(128).default('main'),
   workdir: nonEmpty.max(512),
   installCmd: z.string().max(512).optional(),
@@ -144,7 +154,7 @@ export const WsExecute = WsBase.extend({
     logsCmd:   z.string().optional(),
     launchMode: z.enum(Object.values(LaunchMode)).default(LaunchMode.WRAPPED),
     healthCmd: z.string().optional(),
-    repoUrl: z.string().url().optional(),
+    repoUrl: gitRepoUrl.optional(),
     branch: nonEmpty.default('main'),
     env: z.record(z.string(), z.string()).optional(),
     trusted: z.boolean().default(false),
@@ -238,7 +248,7 @@ const appBaseFields = {
   artifact_pattern: z.string().max(255).optional(),
   remote_install_path: pathAbs.optional(),
   builder_server_id: z.number().int().positive().nullable().optional(),
-  repo_url:         z.string().url().max(512).optional(),
+  repo_url:         gitRepoUrl.optional(),
   branch:           z.string().min(1).max(128).optional(),
   workdir:          pathAbs,
   install_cmd:      cmdString.optional(),
