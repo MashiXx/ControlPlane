@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mysql -h 10.13.13.6 -P 3306 -u root -p'DqB0WL73V^jK#m' controlplane -e \"SELECT id, name, server_id, runtime, build_strategy, artifact_pattern, remote_install_path, repo_url, branch, install_cmd, build_cmd, start_cmd, enabled FROM applications WHERE id=1 \\\\G\")",
+      "Read(//opt/homebrew/opt/mysql-client/bin/**)",
+      "Read(//usr/local/mysql/bin/**)",
+      "Bash(node --env-file=.env -e ' *)",
+      "Bash(GIT_SSH_COMMAND=\"ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new\" git ls-remote 'git@github.com:Grepgame/naruto.git')",
+      "Bash(echo \"---exit=$?---\")",
+      "Read(//Users/mashi/.ssh/**)",
+      "Bash(ssh-add -l)",
+      "Bash(node --env-file=../.env -e ' *)"
+    ]
+  }
+}

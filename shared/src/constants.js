@@ -100,14 +100,25 @@ export const QueueForAction = Object.freeze({
 
 // Default retry profile per action — tuned conservatively.
 // Values: { attempts, backoff: { type, delay, jitter? } }
+// `attempts` is overridable per-action via RETRY_<ACTION>_ATTEMPTS env vars
+// (e.g. RETRY_BUILD_ATTEMPTS=1). Backoff stays hard-coded because the values
+// encode action-specific physics (how long the downstream takes to recover),
+// not operator preference.
 export const RetryProfile = Object.freeze({
-  [JobAction.START]:       { attempts: 3, backoff: { type: 'exponential', delay: 2_000 } },
-  [JobAction.STOP]:        { attempts: 2, backoff: { type: 'exponential', delay: 1_000 } },
-  [JobAction.RESTART]:     { attempts: 3, backoff: { type: 'exponential', delay: 2_000 } },
-  [JobAction.BUILD]:       { attempts: 2, backoff: { type: 'exponential', delay: 10_000 } },
-  [JobAction.DEPLOY]:      { attempts: 2, backoff: { type: 'exponential', delay: 10_000 } },
-  [JobAction.HEALTHCHECK]: { attempts: 1, backoff: { type: 'fixed',       delay: 0      } },
+  [JobAction.START]:       { attempts: envAttempts('START',       3), backoff: { type: 'exponential', delay: 2_000 } },
+  [JobAction.STOP]:        { attempts: envAttempts('STOP',        2), backoff: { type: 'exponential', delay: 1_000 } },
+  [JobAction.RESTART]:     { attempts: envAttempts('RESTART',     3), backoff: { type: 'exponential', delay: 2_000 } },
+  [JobAction.BUILD]:       { attempts: envAttempts('BUILD',       2), backoff: { type: 'exponential', delay: 10_000 } },
+  [JobAction.DEPLOY]:      { attempts: envAttempts('DEPLOY',      2), backoff: { type: 'exponential', delay: 10_000 } },
+  [JobAction.HEALTHCHECK]: { attempts: envAttempts('HEALTHCHECK', 1), backoff: { type: 'fixed',       delay: 0      } },
 });
+
+function envAttempts(action, fallback) {
+  const raw = process.env[`RETRY_${action}_ATTEMPTS`];
+  if (raw == null || raw === '') return fallback;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 1 ? n : fallback;
+}
 
 // WebSocket frame opcodes (controller ↔ agent).
 export const WsOp = Object.freeze({

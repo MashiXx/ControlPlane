@@ -70,6 +70,11 @@ web_modules/
 .env.*
 !.env.example
 
+# Controller-local ephemeral + artifact state (build workdirs, rsync staging,
+# content-addressed artifact store). Everything app-related goes under tmp/
+# so it's easy to inspect and safe to wipe.
+tmp/
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache

@@ -53,8 +53,8 @@ export function startWorkers({ hub, dispatchTimeoutMs, config }) {
 
     try {
       // Branch 1: build on controller host
-      if (action === JobAction.BUILD && payload?.buildOnController) {
-        const r = await runControllerBuild({ job, app, triggeredBy, payload, store });
+      if (action === JobAction.BUILD && app.build_strategy === BuildStrategy.CONTROLLER) {
+        const r = await runControllerBuild({ job, app, triggeredBy, payload, store, config });
         await jobsRepo.markFinished(queueJobId, 'success', { result: r });
         await writeAudit({
           actor: triggeredBy, action: 'build.controller', targetType: 'app',
@@ -118,7 +118,7 @@ export function startWorkers({ hub, dispatchTimeoutMs, config }) {
 }
 
 // ─── Branch 1: build on controller ──────────────────────────────────────
-async function runControllerBuild({ job, app, triggeredBy, payload, store }) {
+async function runControllerBuild({ job, app, triggeredBy, payload, store, config }) {
   if (app.build_strategy !== BuildStrategy.CONTROLLER) {
     throw new PermanentError(
       `build-on-controller requested but app.build_strategy=${app.build_strategy}`,
@@ -133,6 +133,7 @@ async function runControllerBuild({ job, app, triggeredBy, payload, store }) {
     artifactRepo: artifactsRepo,
     buildJobDbId,
     commitSha: payload?.commitSha,
+    workdirBase: config?.buildWorkdirBase,
   });
 
   const releaseId = buildId ?? `${Math.floor(Date.now() / 1000)}-${(artifact.commit_sha ?? 'na').slice(0, 7)}`;
@@ -210,6 +211,7 @@ async function runControllerDeploy({ job, app, triggeredBy, payload, hub, dispat
     server, app, artifact, releaseId,
     secret:        config.artifactSecret,
     publicBaseUrl: config.publicBaseUrl,
+    stagingBase:   config.rsyncStagingDir,
   });
 
   const jobDbRow = await jobsRepo.getByQueueJobId(job.id);

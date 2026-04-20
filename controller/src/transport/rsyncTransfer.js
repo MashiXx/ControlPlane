@@ -37,13 +37,16 @@ const SSH_OPTS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10'];
  * @param {object} p.artifact          - row from artifacts (path, sha256, id)
  * @param {string} p.remoteInstallPath
  * @param {string} p.releaseId
+ * @param {string} [p.stagingBase]     - parent dir for staging extracts; defaults to os.tmpdir()
  * @returns {Promise<{ prestagedPath: string }>}
  */
-export async function pushArtifact({ server, artifact, remoteInstallPath, releaseId }) {
+export async function pushArtifact({ server, artifact, remoteInstallPath, releaseId, stagingBase }) {
   const target = server.hostname;
   if (!target) throw new PermanentError(`server ${server.name} has no hostname`);
 
-  const staging = await fs.mkdtemp(path.join(os.tmpdir(), `cp-stage-${artifact.id}-`));
+  const base = stagingBase ?? os.tmpdir();
+  await fs.mkdir(base, { recursive: true });
+  const staging = await fs.mkdtemp(path.join(base, `cp-stage-${artifact.id}-`));
   try {
     await pipeline(
       createReadStream(artifact.path),

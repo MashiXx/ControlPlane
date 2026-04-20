@@ -1,3 +1,9 @@
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+
+// controller/src/config.js → project root is two levels up (src → controller → repo).
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+
 export function loadControllerConfig() {
   // When the dashboard is enabled (password hash present), the cookie-signing
   // secret must be a real, sufficiently long secret — otherwise sessions are
@@ -29,13 +35,34 @@ export function loadControllerConfig() {
     jobDispatchTimeoutMs: Number(process.env.JOB_DISPATCH_TIMEOUT_MS ?? 15 * 60 * 1000),
     heartbeatMissLimitMs: Number(process.env.HEARTBEAT_MISS_MS ?? 35_000),
 
-    // Controller-side build + artifact storage
-    artifactStoreDir: process.env.ARTIFACT_STORE_DIR ?? '/var/lib/controlplane/artifacts',
+    // Controller-side build + artifact storage. All ephemeral/app-owned files
+    // live under a single project-local `tmp/` tree by default so operators
+    // can tail and inspect them next to the source. CP_TMP_DIR moves the whole
+    // tree; the per-subdir vars override a single leaf.
+    ...resolveTmpLayout(),
     // Secret used to sign artifact download URLs (distinct from jwtSecret)
     artifactSecret:   process.env.ARTIFACT_SIGNING_SECRET ?? process.env.CONTROLLER_JWT_SECRET ?? 'change-me',
     // How agents reach the controller for artifact download (host:port external)
     publicBaseUrl:    process.env.CONTROLLER_PUBLIC_URL ?? 'http://127.0.0.1:8080',
   };
+}
+
+function resolveTmpLayout() {
+  const tmpDir = resolveDir(process.env.CP_TMP_DIR, path.join(PROJECT_ROOT, 'tmp'));
+  return {
+    tmpDir,
+    buildWorkdirBase: resolveDir(process.env.BUILD_WORKDIR_BASE, path.join(tmpDir, 'builds')),
+    rsyncStagingDir:  resolveDir(process.env.RSYNC_STAGING_DIR,  path.join(tmpDir, 'staging')),
+    artifactStoreDir: resolveDir(process.env.ARTIFACT_STORE_DIR, path.join(tmpDir, 'artifacts')),
+  };
+}
+
+function resolveDir(envValue, fallbackAbs) {
+  if (envValue && envValue.trim()) {
+    const v = envValue.trim();
+    return path.isAbsolute(v) ? v : path.resolve(PROJECT_ROOT, v);
+  }
+  return fallbackAbs;
 }
 
 // CONTROLLER_API_TOKENS format: "name:token,name:token"

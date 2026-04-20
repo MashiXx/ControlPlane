@@ -138,7 +138,6 @@ async function enqueueControllerBuild(
     payload: {
       appName: app.name,
       serverId: app.server_id,
-      buildOnController: true,
       commitSha: options?.commitSha,
       // When provided the build worker will chain one DEPLOY per server id
       // rather than a single deploy against app.server_id.
@@ -159,7 +158,6 @@ async function enqueueControllerBuild(
     maxAttempts: profile.attempts,
     triggeredBy,
     payload: {
-      buildOnController: true,
       deployServerIds: deployServerIds ?? null,
       serverGroupName: serverGroupName ?? null,
       options,

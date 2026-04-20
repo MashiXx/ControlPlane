@@ -32,8 +32,9 @@ const BUILD_TIMEOUT_MS = Number(process.env.BUILD_TIMEOUT_MS ?? 30 * 60 * 1000);
  * @param {number} input.buildJobDbId    — jobs.id row for this build
  * @param {(chunk: Buffer, stream: 'stdout'|'stderr') => void} [input.onChunk]
  * @param {string} [input.commitSha]     — optional pin
+ * @param {string} [input.workdirBase]   — parent dir for build workdirs; defaults to os.tmpdir()
  */
-export async function runBuild({ app, store, artifactRepo, buildJobDbId, onChunk, commitSha }) {
+export async function runBuild({ app, store, artifactRepo, buildJobDbId, onChunk, commitSha, workdirBase }) {
   validateApp(app);
 
   const configHash = hashConfig(app);
@@ -49,7 +50,9 @@ export async function runBuild({ app, store, artifactRepo, buildJobDbId, onChunk
   }
 
   const buildId = `${Math.floor(Date.now() / 1000)}-${(commitSha ?? 'head').slice(0, 7)}`;
-  const workdir = await fs.mkdtemp(path.join(os.tmpdir(), `cp-build-${app.id}-`));
+  const base = workdirBase ?? os.tmpdir();
+  await fs.mkdir(base, { recursive: true });
+  const workdir = await fs.mkdtemp(path.join(base, `cp-build-${app.id}-`));
   const tarPath = path.join(workdir, 'artifact.tar.gz');
 
   const log = (msg) => {
