@@ -13,7 +13,9 @@
   </header>
 
   <nav class="tabs">
-    <button data-tab="apps"   class="active">Applications</button>
+    <button data-tab="apps"    class="active">Applications</button>
+    <button data-tab="groups">Groups</button>
+    <button data-tab="servers">Servers</button>
     <button data-tab="jobs">Jobs</button>
     <button data-tab="audit">Audit</button>
     <button data-tab="logs">Live logs</button>
@@ -23,6 +25,7 @@
     <section id="tab-apps" class="tab active">
       <div class="toolbar">
         <select id="groupFilter"><option value="">All groups</option></select>
+        <button id="btn-new-app">+ New app</button>
         <button id="btn-restart-group" class="danger">Restart group</button>
         <button id="btn-build-group">Build group</button>
         <button id="btn-refresh">Refresh</button>
@@ -55,10 +58,36 @@
       </table>
     </section>
 
+    <section id="tab-groups" class="tab">
+      <div class="toolbar">
+        <button id="btn-new-group">+ New group</button>
+      </div>
+      <table id="groups-table">
+        <thead><tr>
+          <th>Name</th><th>Description</th><th>Actions</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section id="tab-servers" class="tab">
+      <div class="toolbar">
+        <button id="btn-new-server">+ New server</button>
+      </div>
+      <table id="servers-table">
+        <thead><tr>
+          <th>Name</th><th>Hostname</th><th>Status</th><th>Transfer</th><th>Last seen</th><th>Actions</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
     <section id="tab-logs" class="tab">
       <pre id="live-logs"></pre>
     </section>
   </main>
+
+  <div id="modal-root"></div>
 
   <script src="/app.js" type="module"></script>
 </body>

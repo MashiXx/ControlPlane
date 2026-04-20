@@ -61,3 +61,66 @@ pre#live-logs {
   height: 70vh; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
 }
+
+/* ─── Modal ───────────────────────────────────────────────────────────── */
+#modal-root { position: fixed; inset: 0; pointer-events: none; z-index: 100; }
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.65);
+  display: flex; align-items: center; justify-content: center;
+  pointer-events: auto;
+}
+.modal {
+  background: #161b22; color: #e6edf3;
+  border: 1px solid #30363d; border-radius: 6px;
+  min-width: 440px; max-width: 760px; width: 60vw;
+  max-height: 85vh; display: flex; flex-direction: column;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+}
+.modal-header {
+  padding: 14px 20px; font-weight: 600; border-bottom: 1px solid #30363d;
+}
+.modal-body {
+  padding: 14px 20px; overflow: auto; flex: 1;
+}
+.modal-footer {
+  padding: 12px 20px; border-top: 1px solid #30363d;
+  display: flex; gap: 8px; justify-content: flex-end;
+}
+.modal-footer button.primary { background: #2f81f7; border-color: #2f81f7; color: #fff; }
+.modal-footer button.primary:hover { background: #1f6feb; }
+
+.modal-body label {
+  display: block; margin-top: 12px; font-size: 13px; color: #8b949e;
+}
+.modal-body input, .modal-body select, .modal-body textarea {
+  width: 100%; margin-top: 4px;
+  padding: 6px 8px; font-family: inherit; font-size: 13px;
+  background: #0d1117; color: #e6edf3;
+  border: 1px solid #30363d; border-radius: 4px;
+}
+.modal-body input:disabled, .modal-body select:disabled, .modal-body textarea:disabled {
+  opacity: 0.5; cursor: not-allowed;
+}
+.modal-body textarea {
+  min-height: 60px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.modal-body fieldset {
+  border: 1px solid #30363d; border-radius: 4px;
+  margin-top: 14px; padding: 6px 14px 12px;
+}
+.modal-body legend { font-weight: 600; padding: 0 6px; color: #e6edf3; }
+.modal-body .banner-warn {
+  padding: 8px 12px; background: #3a3011; border: 1px solid #d4a72c;
+  color: #f2cc60; border-radius: 4px; font-size: 13px; margin-bottom: 12px;
+}
+.modal-body .banner-danger {
+  padding: 8px 12px; background: #3a1112; border: 1px solid #da3633;
+  color: #ff7b72; border-radius: 4px; font-size: 13px; margin-bottom: 12px;
+}
+.token-reveal {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+  background: #010409; color: #7ee787; padding: 10px; margin-top: 4px;
+  border: 1px solid #30363d; border-radius: 4px;
+  word-break: break-all; user-select: all;
+}

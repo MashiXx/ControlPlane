@@ -1,12 +1,17 @@
 // Web dashboard SPA. Minimal, no frameworks.
 
-const apiBase = '/api';
+import { apiClient } from './api.js';
+import { openGroupForm, confirmDeleteGroup } from './forms/group.js';
+import { openServerForm, rotateServerToken, confirmDeleteServer } from './forms/server.js';
+import { openApplicationForm, confirmDeleteApp } from './forms/application.js';
+
 const wsUrl = `${location.origin.replace(/^http/, 'ws')}/ui`;
 
 // ─── state ──────────────────────────────────────────────────────────────
 const state = {
   apps: [],
   groups: [],
+  servers: [],
   jobs: [],
   audit: [],
   filterGroupId: '',
@@ -32,33 +37,29 @@ function el(tag, attrs = {}, children = []) {
 
 function badge(cls, text) { return el('span', { class: `badge st-${cls}` }, text); }
 
-// ─── api ────────────────────────────────────────────────────────────────
-async function api(path, init) {
-  const res = await fetch(apiBase + path, {
-    ...init,
-    credentials: 'same-origin',
-    headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
-  });
-  if (res.status === 401) {
-    location.href = '/login.html';
-    throw new Error('unauthenticated');
-  }
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-  return res.json();
-}
-
+// ─── data ───────────────────────────────────────────────────────────────
 async function refresh() {
-  const [apps, groups, jobs, audit] = await Promise.all([
-    api('/applications'), api('/groups'),
-    api('/jobs?limit=50'), api('/audit?limit=50'),
-  ]);
-  state.apps = apps; state.groups = groups; state.jobs = jobs; state.audit = audit;
-  renderGroups(); renderApps(); renderJobs(); renderAudit();
+  try {
+    const [apps, groups, servers, jobs, audit] = await Promise.all([
+      apiClient.listApps(),
+      apiClient.listGroups(),
+      apiClient.listServers(),
+      apiClient.listJobs(),
+      apiClient.listAudit(),
+    ]);
+    state.apps = apps; state.groups = groups; state.servers = servers;
+    state.jobs = jobs; state.audit = audit;
+    renderGroupsFilter();
+    renderApps(); renderJobs(); renderAudit();
+    renderGroupsTab(); renderServersTab();
+  } catch (err) {
+    if (err.message !== 'unauthenticated') console.warn('refresh failed:', err);
+  }
 }
 
 async function enqueue(action, target) {
   try {
-    await api('/actions', { method: 'POST', body: JSON.stringify({ action, target }) });
+    await apiClient.enqueue(action, target);
     await refresh();
   } catch (err) {
     alert(`Failed: ${err.message}`);
@@ -66,10 +67,10 @@ async function enqueue(action, target) {
 }
 
 // ─── render ─────────────────────────────────────────────────────────────
-function renderGroups() {
+function renderGroupsFilter() {
   const sel = $('#groupFilter');
   sel.innerHTML = '<option value="">All groups</option>' +
-    state.groups.map((g) => `<option value="${g.id}">${escape(g.name)}</option>`).join('');
+    state.groups.map((g) => `<option value="${g.id}">${escapeHtml(g.name)}</option>`).join('');
   sel.value = state.filterGroupId;
 }
 
@@ -81,22 +82,28 @@ function renderApps() {
     : state.apps;
 
   for (const a of filtered) {
-    const groupName = state.groups.find((g) => g.id === a.group_id)?.name ?? '-';
+    const groupName  = state.groups.find((g) => g.id === a.group_id)?.name ?? '-';
+    const serverName = state.servers.find((s) => s.id === a.server_id)?.name ?? String(a.server_id);
     const row = el('tr', {}, [
       el('td', {}, a.name),
       el('td', {}, groupName),
-      el('td', {}, String(a.server_id)),
+      el('td', {}, serverName),
       el('td', {}, a.runtime),
       el('td', {}, [badge(a.process_state, a.process_state)]),
       el('td', {}, a.pid == null ? '-' : String(a.pid)),
       el('td', {}, a.uptime_seconds ? `${a.uptime_seconds}s` : '-'),
       el('td', {}, [
-        el('button', {
-          onclick: () => enqueue('restart', { type: 'app', id: a.id }),
-        }, 'Restart'),
-        el('button', {
-          onclick: () => enqueue('build', { type: 'app', id: a.id }),
-        }, 'Build'),
+        el('button', { onclick: () => enqueue('restart', { type: 'app', id: a.id }) }, 'Restart'),
+        el('button', { onclick: () => enqueue('build',   { type: 'app', id: a.id }) }, 'Build'),
+        el('button', { onclick: () => openApplicationForm({
+          initial: a, servers: state.servers, groups: state.groups, onSaved: refresh,
+        })}, 'Edit'),
+        el('button', { class: 'danger', onclick: async () => {
+          if (await confirmDeleteApp(a)) {
+            try { await apiClient.deleteApp(a.id); await refresh(); }
+            catch (err) { alert(`Delete failed: ${err.message}`); }
+          }
+        }}, 'Delete'),
       ]),
     ]);
     tbody.appendChild(row);
@@ -131,6 +138,50 @@ function renderAudit() {
       el('td', {}, `${a.target_type}:${a.target_id ?? ''}`),
       el('td', {}, [badge(a.result, a.result)]),
       el('td', {}, (a.message ?? '').slice(0, 160)),
+    ]));
+  }
+}
+
+function renderGroupsTab() {
+  const tbody = $('#groups-table tbody');
+  tbody.replaceChildren();
+  for (const g of state.groups) {
+    tbody.appendChild(el('tr', {}, [
+      el('td', {}, g.name),
+      el('td', {}, g.description ?? ''),
+      el('td', {}, [
+        el('button', { onclick: () => openGroupForm({ initial: g, onSaved: refresh }) }, 'Edit'),
+        el('button', { class: 'danger', onclick: async () => {
+          if (await confirmDeleteGroup(g)) {
+            try { await apiClient.deleteGroup(g.id); await refresh(); }
+            catch (err) { alert(`Delete failed: ${err.message}`); }
+          }
+        }}, 'Delete'),
+      ]),
+    ]));
+  }
+}
+
+function renderServersTab() {
+  const tbody = $('#servers-table tbody');
+  tbody.replaceChildren();
+  for (const s of state.servers) {
+    tbody.appendChild(el('tr', {}, [
+      el('td', {}, s.name),
+      el('td', {}, s.hostname),
+      el('td', {}, [badge(s.status ?? 'unknown', s.status ?? 'unknown')]),
+      el('td', {}, s.artifact_transfer),
+      el('td', {}, s.last_seen_at ?? '-'),
+      el('td', {}, [
+        el('button', { onclick: () => openServerForm({ initial: s, onSaved: refresh }) }, 'Edit'),
+        el('button', { onclick: () => rotateServerToken(s, refresh) }, 'Rotate'),
+        el('button', { class: 'danger', onclick: async () => {
+          if (await confirmDeleteServer(s)) {
+            try { await apiClient.deleteServer(s.id); await refresh(); }
+            catch (err) { alert(`Delete failed: ${err.message}`); }
+          }
+        }}, 'Delete'),
+      ]),
     ]));
   }
 }
@@ -199,7 +250,13 @@ $('#btn-build-group').addEventListener('click', () => {
   enqueue('build', { type: 'group', id: g.name });
 });
 
-function escape(s) {
+$('#btn-new-app').addEventListener('click', () => openApplicationForm({
+  servers: state.servers, groups: state.groups, onSaved: refresh,
+}));
+$('#btn-new-group').addEventListener('click',  () => openGroupForm({ onSaved: refresh }));
+$('#btn-new-server').addEventListener('click', () => openServerForm({ onSaved: refresh }));
+
+function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (ch) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[ch]));
