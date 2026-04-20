@@ -212,6 +212,15 @@ export class WsHub {
     }
   }
 
+  // Close an agent's WS so it must reconnect (e.g. after token rotation).
+  // Idempotent: returns false when the server isn't currently connected.
+  disconnectServer(serverId, reason = 'disconnect') {
+    const session = this.sessionsByServer.get(serverId);
+    if (!session) return false;
+    try { session.ws.close(4001, reason); } catch { /* noop */ }
+    return true;
+  }
+
   // ─── Job dispatch ─────────────────────────────────────────────────────
   /**
    * Sends an EXECUTE frame to the correct agent and resolves when the

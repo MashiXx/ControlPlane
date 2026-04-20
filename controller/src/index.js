@@ -20,6 +20,8 @@ const config = loadControllerConfig();
 
 initPool(config.db);
 
+// Late-bound reference the CRUD router uses for token rotation.
+let hub;
 const app = buildHttpApp({
   apiTokens: config.apiTokens,
   artifactSecret: config.artifactSecret,
@@ -27,10 +29,11 @@ const app = buildHttpApp({
   sessionSecret: config.jwtSecret,
   dashboardPasswordHash: config.dashboardPasswordHash,
   isProd: config.isProd,
+  getWsHub: () => hub,
 });
 const httpServer = http.createServer(app);
 
-const hub = new WsHub({
+hub = new WsHub({
   httpServer,
   heartbeatMs: HEARTBEAT_INTERVAL_MS,
   sessionSecret: config.jwtSecret,
