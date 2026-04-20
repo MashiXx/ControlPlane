@@ -206,3 +206,97 @@ export const WsInbound = z.discriminatedUnion('op', [
 export const WsOutbound = z.discriminatedUnion('op', [
   WsExecute, WsCancel, WsError,
 ]);
+
+// ─── CRUD payloads for /api/applications, /api/groups, /api/servers ──────
+//
+// These are NOT the same as ApplicationConfig above. ApplicationConfig is
+// the import-by-NAME JSON format used by CLI tooling; the web form already
+// knows the numeric server_id and group_id because the user picked them
+// from a dropdown, so these schemas use ids directly.
+
+const pathAbs = z.string().regex(
+  /^\/[\w\-./]+$/,
+  'must be an absolute path (no spaces, no "..")',
+).max(512);
+
+const envObject = z.record(
+  z.string().regex(/^[A-Z_][A-Z0-9_]*$/, 'env var must match ^[A-Z_][A-Z0-9_]*$'),
+  z.string(),
+).refine(
+  (obj) => JSON.stringify(obj).length < 32 * 1024,
+  { message: 'env object exceeds 32 KB' },
+);
+
+const cmdString = z.string().max(512);
+const dbName = z.string().regex(/^[a-z0-9-]{1,64}$/, 'lowercase alphanumeric / hyphen, max 64');
+
+const appBaseFields = {
+  name:             dbName,
+  group_id:         z.number().int().positive().nullable().optional(),
+  runtime:          z.enum([Runtime.NODE, Runtime.JAVA]),
+  build_strategy:   z.enum(Object.values(BuildStrategy)).optional(),
+  artifact_pattern: z.string().max(255).optional(),
+  remote_install_path: pathAbs.optional(),
+  builder_server_id: z.number().int().positive().nullable().optional(),
+  repo_url:         z.string().url().max(512).optional(),
+  branch:           z.string().min(1).max(128).optional(),
+  workdir:          pathAbs,
+  install_cmd:      cmdString.optional(),
+  build_cmd:        cmdString.optional(),
+  start_cmd:        cmdString.min(1),
+  stop_cmd:         cmdString.optional(),
+  launch_mode:      z.enum(Object.values(LaunchMode)).optional(),
+  status_cmd:       cmdString.optional(),
+  logs_cmd:         cmdString.optional(),
+  health_cmd:       cmdString.optional(),
+  env:              envObject.optional(),
+  trusted:          z.boolean().optional(),
+  enabled:          z.boolean().optional(),
+};
+
+export const AppCreate = z.object({
+  ...appBaseFields,
+  server_id: z.number().int().positive(),
+}).strict();
+
+export const AppUpdate = z.object(
+  Object.fromEntries(Object.entries(appBaseFields).map(([k, v]) => [k, v.optional()])),
+).strict();
+
+export const GroupCreate = z.object({
+  name: dbName,
+  description: z.string().max(255).optional(),
+}).strict();
+
+export const GroupUpdate = GroupCreate.partial();
+
+const sshConfigSchema = z.object({
+  user: z.string().min(1),
+  host: z.string().min(1),
+  port: z.number().int().min(1).max(65535).optional(),
+  key_path: pathAbs.optional(),
+});
+
+export const ServerCreate = z.object({
+  name: dbName,
+  hostname: z.string().min(1).max(255),
+  artifact_transfer: z.enum(Object.values(ArtifactTransfer)),
+  labels: z.record(z.string(), z.string()).optional(),
+  ssh_config: sshConfigSchema.optional(),
+}).strict().superRefine((cfg, ctx) => {
+  if (cfg.artifact_transfer === ArtifactTransfer.RSYNC && !cfg.ssh_config) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['ssh_config'],
+      message: "artifact_transfer='rsync' requires ssh_config",
+    });
+  }
+});
+
+export const ServerUpdate = z.object({
+  name: dbName.optional(),
+  hostname: z.string().min(1).max(255).optional(),
+  artifact_transfer: z.enum(Object.values(ArtifactTransfer)).optional(),
+  labels: z.record(z.string(), z.string()).nullable().optional(),
+  ssh_config: sshConfigSchema.nullable().optional(),
+}).strict();
