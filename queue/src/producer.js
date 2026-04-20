@@ -34,9 +34,23 @@ import { getQueue } from './queues.js';
  * @property {string}   [parentJobId]   // queue job id of the parent (group fan-out)
  */
 
-export async function enqueueAction(input) {
+// Pure, deterministic: derive the identity pair (queueJobId, idempotencyKey)
+// without touching the queue. Lets orchestrators commit the `jobs` DB row
+// BEFORE pushing to the queue so workers can never race ahead of the row.
+export function jobIdentity(input) {
   validateInput(input);
+  const { action, targetType, targetId } = input;
+  const key = idempotencyKey({
+    action, targetType, targetId: String(targetId),
+    bucketMs: IDEMPOTENCY_WINDOW_MS,
+  });
+  return {
+    queueJobId:     `${action}:${targetType}:${targetId}:${key}`,
+    idempotencyKey: key,
+  };
+}
 
+export async function enqueueAction(input) {
   const {
     action, targetType, targetId, triggeredBy,
     payload = {}, attemptsOverride, delayMs, parentJobId,
@@ -49,14 +63,7 @@ export async function enqueueAction(input) {
   const attempts = attemptsOverride ?? profile.attempts;
   const backoff  = profile.backoff;
 
-  const key = idempotencyKey({
-    action,
-    targetType,
-    targetId: String(targetId),
-    bucketMs: IDEMPOTENCY_WINDOW_MS,
-  });
-
-  const jobId = `${action}:${targetType}:${targetId}:${key}`;
+  const { queueJobId: jobId, idempotencyKey: key } = jobIdentity(input);
 
   const queue = getQueue(queueName);
   const job = await queue.add(

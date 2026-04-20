@@ -12,7 +12,7 @@
 // `applications.expected_state` so the alert detector knows whether a
 // subsequent regression is operator-induced (no alert) or a real outage.
 
-import { enqueueAction } from '@cp/queue';
+import { enqueueAction, jobIdentity } from '@cp/queue';
 import {
   BuildStrategy,
   ExpectedState,
@@ -87,17 +87,24 @@ async function enqueueOne(action, app, triggeredBy, options) {
   }
 
   const profile = RetryProfile[action];
-  const enq = await enqueueAction({
+
+  // Commit the DB row BEFORE enqueueing. The in-process queue fires workers
+  // synchronously from `add()`, so any worker path that looks up the jobs row
+  // by queueJobId would race against the insert and see NULL if we enqueued
+  // first (→ cascading FK failures when the worker inserts child rows like
+  // `artifacts.build_job_id`).
+  const enqInput = {
     action,
     targetType: JobTargetType.APP,
     targetId: app.id,
     triggeredBy,
     payload: { appName: app.name, serverId: app.server_id, options },
-  });
+  };
+  const identity = jobIdentity(enqInput);
 
   const jobId = await jobsRepo.insert({
-    queueJobId: enq.queueJobId,
-    idempotencyKey: enq.idempotencyKey,
+    queueJobId: identity.queueJobId,
+    idempotencyKey: identity.idempotencyKey,
     action,
     targetType: JobTargetType.APP,
     applicationId: app.id,
@@ -110,6 +117,8 @@ async function enqueueOne(action, app, triggeredBy, options) {
     if (err?.code === 'ER_DUP_ENTRY') return null;
     throw err;
   });
+
+  const enq = await enqueueAction(enqInput);
 
   await applyExpectedState(app.id, action);
 
@@ -130,7 +139,9 @@ async function enqueueControllerBuild(
   app, triggeredBy, options, { deployServerIds, serverGroupName } = {},
 ) {
   const profile = RetryProfile[JobAction.BUILD];
-  const enq = await enqueueAction({
+
+  // DB row before queue push — see comment in enqueueOne for the race.
+  const enqInput = {
     action: JobAction.BUILD,
     targetType: JobTargetType.APP,
     targetId: app.id,
@@ -145,11 +156,12 @@ async function enqueueControllerBuild(
       serverGroupName: serverGroupName ?? null,
       options,
     },
-  });
+  };
+  const identity = jobIdentity(enqInput);
 
   const jobId = await jobsRepo.insert({
-    queueJobId: enq.queueJobId,
-    idempotencyKey: enq.idempotencyKey,
+    queueJobId: identity.queueJobId,
+    idempotencyKey: identity.idempotencyKey,
     action: JobAction.BUILD,
     targetType: JobTargetType.APP,
     applicationId: app.id,
@@ -166,6 +178,8 @@ async function enqueueControllerBuild(
     if (err?.code === 'ER_DUP_ENTRY') return null;
     throw err;
   });
+
+  const enq = await enqueueAction(enqInput);
 
   // Deploy transitions the app to expected=running regardless of fan-out width.
   await applyExpectedState(app.id, JobAction.DEPLOY);

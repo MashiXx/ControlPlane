@@ -18,7 +18,7 @@
 //     the agent reconnects.
 //   - Permanent errors (wrapped upstream by createWorker) fail the job.
 
-import { createWorker, enqueueAction } from '@cp/queue';
+import { createWorker, enqueueAction, jobIdentity } from '@cp/queue';
 import {
   BuildStrategy, JobAction, JobTargetType, QueueName, RetryProfile,
 } from '@cp/shared/constants';
@@ -148,7 +148,10 @@ async function runControllerBuild({ job, app, triggeredBy, payload, store, confi
 
   const deployEnqueues = [];
   for (const targetServerId of targetServerIds) {
-    const deployEnq = await enqueueAction({
+    // Precompute identity → insert DB row → enqueue. Same reason as the
+    // orchestrator: the in-process queue dispatches workers synchronously
+    // from `add()`, so any reversed order races the row lookup.
+    const enqInput = {
       action: JobAction.DEPLOY,
       targetType: JobTargetType.APP,
       // Include the target server in the id so fan-out to N servers produces
@@ -162,11 +165,12 @@ async function runControllerBuild({ job, app, triggeredBy, payload, store, confi
         parentBuildQueueJobId: job.id,
         serverIdOverride: targetServerId,
       },
-    });
+    };
+    const identity = jobIdentity(enqInput);
     await jobsRepo.insert({
-      queueJobId: deployEnq.queueJobId,
+      queueJobId: identity.queueJobId,
       parentJobId: buildJobDbId,
-      idempotencyKey: deployEnq.idempotencyKey,
+      idempotencyKey: identity.idempotencyKey,
       action: JobAction.DEPLOY,
       targetType: JobTargetType.APP,
       applicationId: app.id,
@@ -182,6 +186,7 @@ async function runControllerBuild({ job, app, triggeredBy, payload, store, confi
     }).catch((err) => {
       if (err?.code !== 'ER_DUP_ENTRY') throw err;
     });
+    const deployEnq = await enqueueAction(enqInput);
     deployEnqueues.push({ serverId: targetServerId, queueJobId: deployEnq.queueJobId });
   }
 

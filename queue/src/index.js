@@ -1,4 +1,4 @@
-export { enqueueAction, enqueueGroupAction } from './producer.js';
+export { enqueueAction, enqueueGroupAction, jobIdentity } from './producer.js';
 export { createWorker } from './worker.js';
 export {
   getQueue,

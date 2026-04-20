@@ -9,7 +9,9 @@
       "Bash(echo \"---exit=$?---\")",
       "Read(//Users/mashi/.ssh/**)",
       "Bash(ssh-add -l)",
-      "Bash(node --env-file=../.env -e ' *)"
+      "Bash(node --env-file=../.env -e ' *)",
+      "Bash(node -e ' *)",
+      "Bash(node --env-file=/Users/mashi/mashicode/ControlPlane/.env -e ' *)"
     ]
   }
 }
