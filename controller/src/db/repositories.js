@@ -3,11 +3,33 @@
 // is used directly.
 
 import { getPool } from './pool.js';
-import { NotFoundError } from '@cp/shared/errors';
+import { NotFoundError, ConflictError } from '@cp/shared/errors';
 
 const conn = (c) => c ?? getPool();
 
+// Build a dynamic UPDATE statement from a patch, restricted to a whitelist
+// of column names so an attacker-controlled patch key can't touch other
+// columns. Returns null when the patch has nothing the whitelist accepts.
+function buildUpdate(table, id, patch, allowed) {
+  const fields = Object.keys(patch).filter((k) => allowed.has(k));
+  if (fields.length === 0) return null;
+  const set = fields.map((f) => `\`${f}\` = :${f}`).join(', ');
+  const params = { id };
+  for (const f of fields) {
+    const v = patch[f];
+    params[f] = (v !== null && typeof v === 'object') ? JSON.stringify(v) : v;
+  }
+  return {
+    sql: `UPDATE \`${table}\` SET ${set} WHERE id = :id`,
+    params,
+  };
+}
+
 // ─── servers ────────────────────────────────────────────────────────────
+const SERVER_EDITABLE_FIELDS = new Set([
+  'name', 'hostname', 'labels', 'artifact_transfer', 'ssh_config',
+]);
+
 export const servers = {
   async findByTokenHash(hash, c) {
     const [rows] = await conn(c).execute(
@@ -28,6 +50,47 @@ export const servers = {
     const [rows] = await conn(c).execute('SELECT * FROM servers ORDER BY name');
     return rows;
   },
+  async create({ row, tokenHash }, c) {
+    const [res] = await conn(c).execute(
+      `INSERT INTO servers
+         (name, hostname, auth_token_hash, artifact_transfer, labels, ssh_config)
+       VALUES
+         (:name, :hostname, :tokenHash, :artifactTransfer, :labels, :sshConfig)`,
+      {
+        name: row.name,
+        hostname: row.hostname,
+        tokenHash,
+        artifactTransfer: row.artifact_transfer,
+        labels:    row.labels     ? JSON.stringify(row.labels)     : null,
+        sshConfig: row.ssh_config ? JSON.stringify(row.ssh_config) : null,
+      },
+    );
+    return this.get(res.insertId, c);
+  },
+  async update(id, patch, c) {
+    const q = buildUpdate('servers', id, patch, SERVER_EDITABLE_FIELDS);
+    if (!q) return this.get(id, c);
+    await conn(c).execute(q.sql, q.params);
+    return this.get(id, c);
+  },
+  async rotateToken(id, tokenHash, c) {
+    const [res] = await conn(c).execute(
+      'UPDATE servers SET auth_token_hash = :tokenHash WHERE id = :id',
+      { id, tokenHash },
+    );
+    if (res.affectedRows === 0) throw new NotFoundError('server', id);
+  },
+  async delete(id, c) {
+    const n = await applications.countByServerId(id, c);
+    if (n > 0) {
+      throw new ConflictError(
+        `server ${id} still has ${n} application(s); delete or migrate them first`,
+        { appsReferencing: n },
+      );
+    }
+    const [res] = await conn(c).execute('DELETE FROM servers WHERE id = :id', { id });
+    if (res.affectedRows === 0) throw new NotFoundError('server', id);
+  },
   async updateStatus(id, status, c) {
     await conn(c).execute(
       'UPDATE servers SET status = :status, last_seen_at = CURRENT_TIMESTAMP WHERE id = :id',
@@ -46,7 +109,17 @@ export const servers = {
 };
 
 // ─── groups ─────────────────────────────────────────────────────────────
+const GROUP_EDITABLE_FIELDS = new Set(['name', 'description']);
+
 export const groups = {
+  async get(id, c) {
+    const [rows] = await conn(c).execute(
+      'SELECT * FROM `groups` WHERE id = :id LIMIT 1',
+      { id },
+    );
+    if (!rows[0]) throw new NotFoundError('group', id);
+    return rows[0];
+  },
   async getByName(name, c) {
     const [rows] = await conn(c).execute(
       'SELECT * FROM `groups` WHERE name = :name LIMIT 1',
@@ -58,9 +131,42 @@ export const groups = {
     const [rows] = await conn(c).execute('SELECT * FROM `groups` ORDER BY name');
     return rows;
   },
+  async create(row, c) {
+    const [res] = await conn(c).execute(
+      'INSERT INTO `groups` (name, description) VALUES (:name, :description)',
+      { name: row.name, description: row.description ?? null },
+    );
+    return this.get(res.insertId, c);
+  },
+  async update(id, patch, c) {
+    const q = buildUpdate('groups', id, patch, GROUP_EDITABLE_FIELDS);
+    if (!q) return this.get(id, c);
+    await conn(c).execute(q.sql, q.params);
+    return this.get(id, c);
+  },
+  async delete(id, c) {
+    const [res] = await conn(c).execute('DELETE FROM `groups` WHERE id = :id', { id });
+    if (res.affectedRows === 0) throw new NotFoundError('group', id);
+  },
 };
 
 // ─── applications ───────────────────────────────────────────────────────
+const APP_EDITABLE_FIELDS = new Set([
+  'name', 'group_id', 'runtime', 'build_strategy', 'artifact_pattern',
+  'remote_install_path', 'builder_server_id', 'repo_url', 'branch',
+  'workdir', 'install_cmd', 'build_cmd', 'start_cmd', 'stop_cmd',
+  'launch_mode', 'status_cmd', 'logs_cmd', 'health_cmd', 'env',
+  'trusted', 'enabled',
+]);
+
+const APP_CREATE_COLUMNS = [
+  'name', 'server_id', 'group_id', 'runtime', 'build_strategy',
+  'artifact_pattern', 'remote_install_path', 'builder_server_id',
+  'repo_url', 'branch', 'workdir', 'install_cmd', 'build_cmd',
+  'start_cmd', 'stop_cmd', 'launch_mode', 'status_cmd', 'logs_cmd',
+  'health_cmd', 'env', 'trusted', 'enabled',
+];
+
 export const applications = {
   async get(id, c) {
     const [rows] = await conn(c).execute(
@@ -83,6 +189,64 @@ export const applications = {
   async list(c) {
     const [rows] = await conn(c).execute('SELECT * FROM applications ORDER BY name');
     return rows;
+  },
+  async countByServerId(serverId, c) {
+    const [rows] = await conn(c).execute(
+      'SELECT COUNT(*) AS n FROM applications WHERE server_id = :serverId',
+      { serverId },
+    );
+    return Number(rows[0].n);
+  },
+  async create(row, c) {
+    const params = {};
+    for (const col of APP_CREATE_COLUMNS) {
+      const v = row[col];
+      if (v === undefined) { params[col] = null; continue; }
+      params[col] = (v !== null && typeof v === 'object') ? JSON.stringify(v) : v;
+    }
+    const placeholders = APP_CREATE_COLUMNS.map((k) => `:${k}`).join(', ');
+    const cols = APP_CREATE_COLUMNS.map((k) => `\`${k}\``).join(', ');
+    const [res] = await conn(c).execute(
+      `INSERT INTO applications (${cols}) VALUES (${placeholders})`,
+      params,
+    );
+    return this.get(res.insertId, c);
+  },
+  async update(id, patch, c) {
+    const q = buildUpdate('applications', id, patch, APP_EDITABLE_FIELDS);
+    if (!q) return this.get(id, c);
+    await conn(c).execute(q.sql, q.params);
+    return this.get(id, c);
+  },
+  async delete(id, c) {
+    const pool = conn(c);
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [rows] = await connection.execute(
+        'SELECT enabled, process_state FROM applications WHERE id = :id FOR UPDATE',
+        { id },
+      );
+      if (!rows[0]) {
+        await connection.rollback();
+        throw new NotFoundError('application', id);
+      }
+      const { enabled, process_state } = rows[0];
+      if (enabled === 1 || process_state !== 'stopped') {
+        await connection.rollback();
+        throw new ConflictError(
+          `application ${id} must be enabled=0 and process_state='stopped' (currently enabled=${enabled}, state='${process_state}')`,
+          { enabled, process_state },
+        );
+      }
+      await connection.execute('DELETE FROM applications WHERE id = :id', { id });
+      await connection.commit();
+    } catch (err) {
+      try { await connection.rollback(); } catch { /* already rolled back */ }
+      throw err;
+    } finally {
+      connection.release();
+    }
   },
   async updateProcessState(id, patch, c) {
     await conn(c).execute(
