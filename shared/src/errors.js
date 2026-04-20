@@ -44,6 +44,12 @@ export class NotFoundError extends PermanentError {
   }
 }
 
+export class ConflictError extends PermanentError {
+  constructor(message, meta) {
+    super(message, { code: 'E_CONFLICT', meta });
+  }
+}
+
 export class AuthError extends PermanentError {
   constructor(message = 'unauthorized') {
     super(message, { code: 'E_AUTH' });

@@ -7,6 +7,7 @@ const codeToStatus = {
   E_VALIDATION:      400,
   E_NOT_FOUND:       404,
   E_AUTH:            401,
+  E_CONFLICT:        409,
   E_CMD_NOT_ALLOWED: 400,
   E_AGENT_UNAVAILABLE: 503,
   E_TIMEOUT:         504,
