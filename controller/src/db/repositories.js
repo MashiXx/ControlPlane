@@ -107,6 +107,100 @@ export const servers = {
   },
 };
 
+// ─── server_groups ──────────────────────────────────────────────────────
+// Fan-out deploy targets. Separate namespace from `groups` (which groups
+// applications): a server_group bundles servers, with no FK back from apps.
+const SERVER_GROUP_EDITABLE_FIELDS = new Set(['name', 'description']);
+
+export const serverGroups = {
+  async get(id, c) {
+    const [rows] = await conn(c).execute(
+      'SELECT * FROM server_groups WHERE id = :id LIMIT 1', { id },
+    );
+    if (!rows[0]) throw new NotFoundError('server_group', id);
+    return rows[0];
+  },
+  async getByName(name, c) {
+    const [rows] = await conn(c).execute(
+      'SELECT * FROM server_groups WHERE name = :name LIMIT 1', { name },
+    );
+    return rows[0] ?? null;
+  },
+  // listWithMemberCounts returns each group with `member_count` attached so
+  // the dashboard can render "eu-prod (4)" without a second round-trip.
+  async list(c) {
+    const [rows] = await conn(c).execute(
+      `SELECT sg.*, COUNT(m.server_id) AS member_count
+         FROM server_groups sg
+         LEFT JOIN server_group_members m ON m.server_group_id = sg.id
+         GROUP BY sg.id
+         ORDER BY sg.name`,
+    );
+    return rows.map((r) => ({ ...r, member_count: Number(r.member_count) }));
+  },
+  async create(row, c) {
+    const [res] = await conn(c).execute(
+      'INSERT INTO server_groups (name, description) VALUES (:name, :description)',
+      { name: row.name, description: row.description ?? null },
+    );
+    return this.get(res.insertId, c);
+  },
+  async update(id, patch, c) {
+    const q = buildUpdate('server_groups', id, patch, SERVER_GROUP_EDITABLE_FIELDS);
+    if (!q) return this.get(id, c);
+    await conn(c).execute(q.sql, q.params);
+    return this.get(id, c);
+  },
+  async delete(id, c) {
+    // Members are removed automatically via ON DELETE CASCADE on the FK.
+    const [res] = await conn(c).execute('DELETE FROM server_groups WHERE id = :id', { id });
+    if (res.affectedRows === 0) throw new NotFoundError('server_group', id);
+  },
+  async listMembers(id, c) {
+    const [rows] = await conn(c).execute(
+      `SELECT s.* FROM servers s
+         JOIN server_group_members m ON m.server_id = s.id
+        WHERE m.server_group_id = :id
+        ORDER BY s.name`,
+      { id },
+    );
+    return rows;
+  },
+  async listMemberIds(id, c) {
+    const [rows] = await conn(c).execute(
+      `SELECT server_id FROM server_group_members WHERE server_group_id = :id`,
+      { id },
+    );
+    return rows.map((r) => Number(r.server_id));
+  },
+  // replaceMembers atomically swaps the membership for a group. Used by
+  // PATCH /api/server-groups/:id when the client sends a fresh serverIds
+  // array — simpler than add/remove diffs and matches UI semantics.
+  async replaceMembers(id, serverIds, c) {
+    const pool = conn(c);
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await connection.execute(
+        'DELETE FROM server_group_members WHERE server_group_id = :id', { id },
+      );
+      for (const sid of serverIds) {
+        await connection.execute(
+          `INSERT INTO server_group_members (server_group_id, server_id)
+             VALUES (:id, :sid)`,
+          { id, sid },
+        );
+      }
+      await connection.commit();
+    } catch (err) {
+      try { await connection.rollback(); } catch { /* already rolled back */ }
+      throw err;
+    } finally {
+      connection.release();
+    }
+  },
+};
+
 // ─── groups ─────────────────────────────────────────────────────────────
 const GROUP_EDITABLE_FIELDS = new Set(['name', 'description']);
 
@@ -262,6 +356,22 @@ export const applications = {
         uptime:   patch.uptime   ?? null,
         exitCode: patch.exitCode ?? null,
       },
+    );
+  },
+  // Set operator-expected state. Called from the orchestrator when a lifecycle
+  // action is enqueued: start/restart/deploy → running, stop → stopped.
+  // Deliberately NOT exposed through the CRUD update whitelist — expected
+  // state is derived from action submission, never user-patched directly.
+  async setExpectedState(id, expected, c) {
+    await conn(c).execute(
+      'UPDATE applications SET expected_state = :expected WHERE id = :id',
+      { id, expected },
+    );
+  },
+  async markAlerted(id, c) {
+    await conn(c).execute(
+      'UPDATE applications SET last_alert_at = CURRENT_TIMESTAMP WHERE id = :id',
+      { id },
     );
   },
 };

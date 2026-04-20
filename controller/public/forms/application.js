@@ -4,13 +4,9 @@ import { apiClient } from '../api.js';
 const escape = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// Phase 1 ships Java-only defaults. The map is kept (rather than inlined)
+// so reintroducing node/pm2 later is just a matter of adding a key.
 const RUNTIME_DEFAULTS = {
-  node: {
-    install_cmd: 'npm ci',
-    build_cmd:   'npm run build',
-    start_cmd:   'node dist/index.js',
-    launch_mode: 'wrapped',
-  },
   java: {
     build_cmd:        'mvn -B package',
     artifact_pattern: 'target/*.jar',
@@ -64,9 +60,9 @@ export function openApplicationForm({ initial, servers, groups, onSaved }) {
       </label>
       <label>Runtime
         <select name="runtime" required>
-          <option value="node" ${initial?.runtime === 'node' ? 'selected' : ''}>node</option>
-          <option value="java" ${initial?.runtime === 'java' ? 'selected' : ''}>java</option>
+          <option value="java" selected>java</option>
         </select>
+        <small>Node.js &amp; PM2 return in phase 2.</small>
       </label>
     </fieldset>
 
@@ -105,7 +101,7 @@ export function openApplicationForm({ initial, servers, groups, onSaved }) {
     <fieldset><legend>Run</legend>
       <label>Launch mode
         <select name="launch_mode">
-          ${['wrapped','raw','pm2','systemd'].map((v) =>
+          ${['wrapped','raw','systemd'].map((v) =>
             `<option value="${v}" ${initial?.launch_mode === v ? 'selected' : ''}>${v}</option>`).join('')}
         </select>
       </label>

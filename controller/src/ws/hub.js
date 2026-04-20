@@ -25,10 +25,14 @@ import { SESSION_COOKIE_NAME, verifySessionToken } from '../auth/session.js';
 const logger = createLogger({ service: 'ws.hub' });
 
 export class WsHub {
-  constructor({ httpServer, heartbeatMs, onJobResult, sessionSecret }) {
+  constructor({ httpServer, heartbeatMs, onJobResult, sessionSecret, alertManager }) {
     this.heartbeatMs = heartbeatMs;
     this.onJobResult = onJobResult;
     this.sessionSecret = sessionSecret;
+    // Optional: when provided, heartbeat handling consults this module to
+    // fire an alert if an app's reported state regresses against the
+    // operator-expected state. No-op when unset (tests, minimal wiring).
+    this.alertManager = alertManager ?? null;
 
     /** @type {Map<number, AgentSession>} */
     this.sessionsByServer = new Map();
@@ -135,6 +139,16 @@ export class WsHub {
           applications.updateProcessState(a.id, {
             state: a.state, pid: a.pid, uptime: a.uptimeSeconds, exitCode: a.lastExitCode,
           }).catch(() => {});
+          // Alert detector: fetch the fresh row (it now holds the updated
+          // process_state plus expected_state/last_alert_at) and let the
+          // manager decide whether this transition warrants a page.
+          if (this.alertManager) {
+            applications.get(a.id)
+              .then((row) => this.alertManager.evaluate(row, a.state, {
+                serverId: session.server.id, pid: a.pid, lastExitCode: a.lastExitCode,
+              }))
+              .catch(() => {});
+          }
         }
         this._broadcastUi({ op: 'state', serverId: session.server.id, apps: parsed.data.apps });
         return;
@@ -211,6 +225,10 @@ export class WsHub {
       try { ws.send(payload); } catch { /* noop */ }
     }
   }
+
+  // Public wrapper so modules outside this file (e.g. AlertManager) can push
+  // a frame to every connected dashboard without reaching into `_broadcastUi`.
+  broadcastUi(frame) { this._broadcastUi(frame); }
 
   // Close an agent's WS so it must reconnect (e.g. after token rotation).
   // Idempotent: returns false when the server isn't currently connected.

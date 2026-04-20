@@ -4,6 +4,9 @@ import { apiClient } from './api.js';
 import { openGroupForm, confirmDeleteGroup } from './forms/group.js';
 import { openServerForm, rotateServerToken, confirmDeleteServer } from './forms/server.js';
 import { openApplicationForm, confirmDeleteApp } from './forms/application.js';
+import {
+  openServerGroupForm, confirmDeleteServerGroup, deployToServerGroup,
+} from './forms/serverGroup.js';
 
 const wsUrl = `${location.origin.replace(/^http/, 'ws')}/ui`;
 
@@ -12,6 +15,7 @@ const state = {
   apps: [],
   groups: [],
   servers: [],
+  serverGroups: [],
   jobs: [],
   audit: [],
   filterGroupId: '',
@@ -40,26 +44,27 @@ function badge(cls, text) { return el('span', { class: `badge st-${cls}` }, text
 // ─── data ───────────────────────────────────────────────────────────────
 async function refresh() {
   try {
-    const [apps, groups, servers, jobs, audit] = await Promise.all([
+    const [apps, groups, servers, serverGroups, jobs, audit] = await Promise.all([
       apiClient.listApps(),
       apiClient.listGroups(),
       apiClient.listServers(),
+      apiClient.listServerGroups(),
       apiClient.listJobs(),
       apiClient.listAudit(),
     ]);
     state.apps = apps; state.groups = groups; state.servers = servers;
-    state.jobs = jobs; state.audit = audit;
+    state.serverGroups = serverGroups; state.jobs = jobs; state.audit = audit;
     renderGroupsFilter();
     renderApps(); renderJobs(); renderAudit();
-    renderGroupsTab(); renderServersTab();
+    renderGroupsTab(); renderServersTab(); renderServerGroupsTab();
   } catch (err) {
     if (err.message !== 'unauthenticated') console.warn('refresh failed:', err);
   }
 }
 
-async function enqueue(action, target) {
+async function enqueue(action, target, options) {
   try {
-    await apiClient.enqueue(action, target);
+    await apiClient.enqueue(action, target, options);
     await refresh();
   } catch (err) {
     alert(`Failed: ${err.message}`);
@@ -84,16 +89,30 @@ function renderApps() {
   for (const a of filtered) {
     const groupName  = state.groups.find((g) => g.id === a.group_id)?.name ?? '-';
     const serverName = state.servers.find((s) => s.id === a.server_id)?.name ?? String(a.server_id);
-    const row = el('tr', {}, [
+    const expected = a.expected_state ?? 'stopped';
+    // Highlight a drift: expected running but actually stopped/crashed/unknown
+    // is what the alert manager pages on.
+    const drifted = expected === 'running'
+      && ['stopped', 'crashed', 'unknown'].includes(a.process_state);
+    const stopBtnLabel = expected === 'stopped' ? 'Resume' : 'Pause';
+    const stopBtnAction = expected === 'stopped' ? 'start' : 'stop';
+
+    const row = el('tr', { class: drifted ? 'row-drift' : '' }, [
       el('td', {}, a.name),
       el('td', {}, groupName),
       el('td', {}, serverName),
       el('td', {}, a.runtime),
       el('td', {}, [badge(a.process_state, a.process_state)]),
+      el('td', {}, [badge(`expected-${expected}`, expected)]),
       el('td', {}, a.pid == null ? '-' : String(a.pid)),
       el('td', {}, a.uptime_seconds ? `${a.uptime_seconds}s` : '-'),
       el('td', {}, [
+        el('button', {
+          title: stopBtnAction === 'start' ? 'Start (resume) the app' : 'Stop (pause) the app',
+          onclick: () => enqueue(stopBtnAction, { type: 'app', id: a.id }),
+        }, stopBtnLabel),
         el('button', { onclick: () => enqueue('restart', { type: 'app', id: a.id }) }, 'Restart'),
+        el('button', { onclick: () => enqueue('deploy',  { type: 'app', id: a.id }) }, 'Deploy'),
         el('button', { onclick: () => enqueue('build',   { type: 'app', id: a.id }) }, 'Build'),
         el('button', { onclick: () => openApplicationForm({
           initial: a, servers: state.servers, groups: state.groups, onSaved: refresh,
@@ -107,6 +126,32 @@ function renderApps() {
       ]),
     ]);
     tbody.appendChild(row);
+  }
+}
+
+function renderServerGroupsTab() {
+  const tbody = $('#server-groups-table tbody');
+  tbody.replaceChildren();
+  for (const g of state.serverGroups) {
+    tbody.appendChild(el('tr', {}, [
+      el('td', {}, g.name),
+      el('td', {}, g.description ?? ''),
+      el('td', {}, String(g.member_count ?? 0)),
+      el('td', {}, [
+        el('button', { onclick: () => deployToServerGroup({
+          group: g, apps: state.apps, onEnqueued: refresh,
+        })}, 'Deploy to group'),
+        el('button', { onclick: () => openServerGroupForm({
+          initial: g, servers: state.servers, onSaved: refresh,
+        })}, 'Edit'),
+        el('button', { class: 'danger', onclick: async () => {
+          if (await confirmDeleteServerGroup(g)) {
+            try { await apiClient.deleteServerGroup(g.id); await refresh(); }
+            catch (err) { alert(`Delete failed: ${err.message}`); }
+          }
+        }}, 'Delete'),
+      ]),
+    ]));
   }
 }
 
@@ -222,6 +267,33 @@ function onFrame(frame) {
   if (frame.op === 'job:result' || frame.op === 'job:update') {
     refresh().catch(() => {});
   }
+  if (frame.op === 'alert') {
+    showAlertBanner(frame);
+    refresh().catch(() => {});
+  }
+}
+
+// Push an alert frame onto the top-of-page banner stack. The banner lives
+// outside the <main> tabs so it's visible no matter which view is active.
+// Each banner self-dismisses after 30s; the user can also close manually.
+function showAlertBanner(frame) {
+  const root = $('#alerts-banner');
+  if (!root) return;
+  root.hidden = false;
+  const item = el('div', { class: 'alert-item' }, [
+    el('span', { class: 'alert-dot' }, '●'),
+    el('span', { class: 'alert-text' },
+      `${frame.message ?? `${frame.appName} ${frame.state}`} · ${frame.at ?? ''}`),
+    el('button', {
+      class: 'alert-dismiss',
+      onclick: () => { item.remove(); if (!root.children.length) root.hidden = true; },
+    }, '×'),
+  ]);
+  root.appendChild(item);
+  setTimeout(() => {
+    item.remove();
+    if (!root.children.length) root.hidden = true;
+  }, 30_000);
 }
 
 // ─── tabs + toolbar ─────────────────────────────────────────────────────
@@ -255,6 +327,9 @@ $('#btn-new-app').addEventListener('click', () => openApplicationForm({
 }));
 $('#btn-new-group').addEventListener('click',  () => openGroupForm({ onSaved: refresh }));
 $('#btn-new-server').addEventListener('click', () => openServerForm({ onSaved: refresh }));
+$('#btn-new-server-group').addEventListener('click', () => openServerGroupForm({
+  servers: state.servers, onSaved: refresh,
+}));
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (ch) => ({

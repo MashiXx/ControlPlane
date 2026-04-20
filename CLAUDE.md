@@ -39,7 +39,8 @@ These cut across multiple files and are easy to violate:
 - **In-process queue, no broker.** Queues live in the controller process (`queue/src/queues.js`). Restarting the controller drops anything not yet picked up — this is the intentional trade-off vs. Redis. Don't reintroduce Redis without explicit ask.
 - **Idempotency window.** `producer.js` derives `jobId = action:targetType:targetId:timeBucket` so the same action against the same target inside `IDEMPOTENCY_WINDOW_MS` (5s) returns the existing job rather than creating a new one. The `jobs.idempotency_key` column is `UNIQUE` — duplicate inserts will get `ER_DUP_ENTRY` and must be tolerated by callers.
 - **Retry only on `TransientError`.** `shared/src/errors.js` defines `TransientError` vs `PermanentError`. The worker checks `err.transient`. Validation, auth, "command not whitelisted", "app disabled" are permanent → fail fast, never retry. `AgentUnavailableError` is transient → retried after agent reconnects.
-- **Constants ↔ schema must stay aligned.** All enum values in `shared/src/constants.js` (`JobAction`, `JobStatus`, `BuildStrategy`, `LaunchMode`, `ArtifactTransfer`, `ProcessState`, `ServerStatus`, `Runtime`) mirror MySQL `ENUM` columns in `db/schema.sql`. Adding a value requires editing both — and a migration.
+- **Constants ↔ schema must stay aligned.** All enum values in `shared/src/constants.js` (`JobAction`, `JobStatus`, `BuildStrategy`, `LaunchMode`, `ArtifactTransfer`, `ProcessState`, `ServerStatus`, `Runtime`, `ExpectedState`) mirror MySQL `ENUM` columns in `db/schema.sql`. Adding a value requires editing both — and a migration.
+- **Phase 1 is Java-only.** `Runtime = {JAVA}` and `LaunchMode` excludes `pm2`. Node.js/PM2 support returns in phase 2 — do NOT reintroduce `node` as a runtime or `pm2` as a launch mode without a paired migration and UI work.
 - **Four named queues, not one.** `cp:restart`, `cp:build`, `cp:deploy`, `cp:system` (`QueueName` in constants). Each gets its own worker so a slow build can't starve restarts. `QueueForAction` maps actions to queues — extend both when adding an action.
 
 ## Controller ↔ agent protocol
@@ -61,6 +62,31 @@ A `deploy` is two-phase when `applications.build_strategy = 'controller'`:
 Artifacts are deduped by `(application_id, sha256)` AND by `(application_id, commit_sha, config_hash)` where `config_hash = sha256(install_cmd|build_cmd|artifact_pattern)`. Same commit + same build config → reused artifact, no rebuild.
 
 `build_strategy = 'target'` (default, legacy) is the original single-step flow: agent does pull + install + build + restart in-place. Don't conflate the two code paths.
+
+## Server groups & fan-out deploy
+
+Separate from `groups` (which bundles *applications*): `server_groups` + `server_group_members` bundle **servers** for deploy fan-out. The flow is:
+
+1. Operator creates a server-group (e.g. `eu-payments`) and picks member servers via the dashboard's "Server groups" tab.
+2. Operator (or bot/API) submits `POST /api/actions` with `{ action: 'deploy', target: { type: 'server_group', id: 'eu-payments' }, options: { applicationId: 42 } }`.
+3. Orchestrator enqueues **one** controller BUILD carrying `payload.deployServerIds = [<member ids>]` and `serverGroupName`.
+4. On build success the build worker enqueues **N** deploy jobs — one per member — each with `payload.serverIdOverride` set so `runControllerDeploy` and `dispatchToAgent` hit the right agent.
+5. Server-group deploys require `build_strategy = 'controller'`. The orchestrator rejects agent-side builds because they can't be multiplexed across servers.
+
+## Expected state & alert-on-down
+
+Every lifecycle action flips `applications.expected_state`:
+
+- `start`, `restart`, `deploy` → `running`
+- `stop` → `stopped`
+
+The alert detector (`controller/src/alerts/alertManager.js`) is invoked on every heartbeat by `WsHub`. When `expected_state='running'` and the agent reports `crashed`, `stopped`, or `unknown`, it:
+
+1. Writes an `alert.app-down` row to `audit_logs`.
+2. Broadcasts an `{ op: 'alert' }` frame to every `/ui` WS client (shown as a red sticky banner in the SPA).
+3. Calls `bot.notifyAdmins(text)` if the Telegram bot is running, paging every chat id in `TELEGRAM_ADMIN_CHAT_IDS`.
+
+Debounce is 5 minutes per app (`applications.last_alert_at`) — enough to ride out an investigation, short enough that a fresh incident still pages. Expected state is **not** part of `APP_EDITABLE_FIELDS`; it's derived from action submission, never PATCH'd directly.
 
 ## Dashboard auth
 

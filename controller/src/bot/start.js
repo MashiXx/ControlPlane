@@ -20,7 +20,9 @@ export function startBot({ logger }) {
   const token = process.env.TELEGRAM_TOKEN;
   if (!token) {
     logger.info('bot:disabled (TELEGRAM_TOKEN not set)');
-    return { stop: async () => {} };
+    // Always return a notifyAdmins so the AlertManager doesn't need null
+    // checks; it's a no-op when the bot is disabled.
+    return { stop: async () => {}, notifyAdmins: async () => {} };
   }
 
   const admins = new Set(
@@ -120,10 +122,22 @@ export function startBot({ logger }) {
 
   logger.info({ admins: admins.size }, 'bot:started');
 
+  // Broadcast an alert text to every admin chat. Wired to the AlertManager
+  // in controller/src/index.js — the alert manager stays decoupled from the
+  // telegram library via this thin callback.
+  const notifyAdmins = async (text) => {
+    if (admins.size === 0) return;
+    for (const chatId of admins) {
+      try { await send(chatId, text); }
+      catch (err) { logger.warn({ err: err.message, chatId }, 'bot:notify-failed'); }
+    }
+  };
+
   return {
     stop: async () => {
       try { await bot.stopPolling(); }
       catch (err) { logger.warn({ err: err.message }, 'bot:stop-failed'); }
     },
+    notifyAdmins,
   };
 }

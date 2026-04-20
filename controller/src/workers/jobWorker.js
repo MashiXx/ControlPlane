@@ -135,47 +135,74 @@ async function runControllerBuild({ job, app, triggeredBy, payload, store }) {
     commitSha: payload?.commitSha,
   });
 
-  // Chain: enqueue the deploy job now that we have an artifact.
   const releaseId = buildId ?? `${Math.floor(Date.now() / 1000)}-${(artifact.commit_sha ?? 'na').slice(0, 7)}`;
-  const deployEnq = await enqueueAction({
-    action: JobAction.DEPLOY,
-    targetType: JobTargetType.APP,
-    targetId: app.id,
-    triggeredBy,
-    payload: {
-      artifactId: artifact.id,
-      releaseId,
-      parentBuildQueueJobId: job.id,
-    },
-  });
-  await jobsRepo.insert({
-    queueJobId: deployEnq.queueJobId,
-    parentJobId: buildJobDbId,
-    idempotencyKey: deployEnq.idempotencyKey,
-    action: JobAction.DEPLOY,
-    targetType: JobTargetType.APP,
-    applicationId: app.id,
-    groupId: app.group_id,
-    serverId: app.server_id,
-    maxAttempts: RetryProfile[JobAction.DEPLOY].attempts,
-    triggeredBy,
-    payload: { artifactId: artifact.id, releaseId },
-  }).catch((err) => {
-    if (err?.code !== 'ER_DUP_ENTRY') throw err;  // concurrent enqueue, ignore
-  });
+
+  // When the orchestrator targeted a server_group, payload.deployServerIds
+  // carries the fan-out list. Otherwise we deploy to the app's home server
+  // (classic single-target flow). Either way the same artifact is reused;
+  // the artifact store is content-addressed, not server-scoped.
+  const targetServerIds = Array.isArray(payload?.deployServerIds) && payload.deployServerIds.length
+    ? payload.deployServerIds
+    : [app.server_id];
+
+  const deployEnqueues = [];
+  for (const targetServerId of targetServerIds) {
+    const deployEnq = await enqueueAction({
+      action: JobAction.DEPLOY,
+      targetType: JobTargetType.APP,
+      // Include the target server in the id so fan-out to N servers produces
+      // N distinct queue job ids. Without this the idempotency key collapses
+      // all N deploys into one for a single-app fan-out.
+      targetId: `${app.id}@${targetServerId}`,
+      triggeredBy,
+      payload: {
+        artifactId: artifact.id,
+        releaseId,
+        parentBuildQueueJobId: job.id,
+        serverIdOverride: targetServerId,
+      },
+    });
+    await jobsRepo.insert({
+      queueJobId: deployEnq.queueJobId,
+      parentJobId: buildJobDbId,
+      idempotencyKey: deployEnq.idempotencyKey,
+      action: JobAction.DEPLOY,
+      targetType: JobTargetType.APP,
+      applicationId: app.id,
+      groupId: app.group_id,
+      serverId: targetServerId,
+      maxAttempts: RetryProfile[JobAction.DEPLOY].attempts,
+      triggeredBy,
+      payload: {
+        artifactId: artifact.id,
+        releaseId,
+        serverIdOverride: targetServerId,
+      },
+    }).catch((err) => {
+      if (err?.code !== 'ER_DUP_ENTRY') throw err;
+    });
+    deployEnqueues.push({ serverId: targetServerId, queueJobId: deployEnq.queueJobId });
+  }
 
   return {
     artifactId: artifact.id,
     sha256: artifact.sha256,
     reused,
     releaseId,
-    deployQueueJobId: deployEnq.queueJobId,
+    deploys: deployEnqueues,
+    fanOut: payload?.serverGroupName
+      ? { serverGroupName: payload.serverGroupName, count: targetServerIds.length }
+      : undefined,
   };
 }
 
 // ─── Branch 2: deploy controller-built artifact ─────────────────────────
 async function runControllerDeploy({ job, app, triggeredBy, payload, hub, dispatchTimeoutMs, config }) {
-  const server = await servers.get(app.server_id);
+  // serverIdOverride is set by the build phase when the orchestrator targeted
+  // a server_group, so the same artifact can be delivered to several servers
+  // without each deploy re-reading the app row for app.server_id.
+  const targetServerId = payload.serverIdOverride ?? app.server_id;
+  const server = await servers.get(targetServerId);
   const artifact = await artifactsRepo.get(payload.artifactId);
   const releaseId = payload.releaseId ?? `${Math.floor(Date.now() / 1000)}-${(artifact.commit_sha ?? 'na').slice(0, 7)}`;
 
@@ -225,7 +252,11 @@ async function runControllerDeploy({ job, app, triggeredBy, payload, hub, dispat
 
 // ─── Branch 3: generic dispatch (start/stop/restart/etc) ────────────────
 async function dispatchToAgent({ job, app, hub, dispatchTimeoutMs }) {
-  const server = await servers.get(app.server_id);
+  // serverIdOverride is carried through for actions invoked as part of a
+  // server-group fan-out; for the normal single-target case it's unset and
+  // we fall back to the app's home server.
+  const targetServerId = job.data.payload?.serverIdOverride ?? app.server_id;
+  const server = await servers.get(targetServerId);
   const executeFrame = {
     jobId: job.id,
     action: job.data.action,

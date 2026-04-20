@@ -56,6 +56,33 @@ CREATE TABLE IF NOT EXISTS servers (
 ) ENGINE=InnoDB;
 
 -- ─────────────────────────────────────────────────────────────────────────
+-- server_groups — named bundles of servers used as deploy fan-out targets
+-- ─────────────────────────────────────────────────────────────────────────
+-- Separate from `groups` (which groups *applications*). A server_group is
+-- purely a rollout concept: "deploy app X to server_group eu-payments" fans
+-- out into one deploy job per member server. Membership is many-to-many;
+-- the same server can belong to several groups (e.g. 'canary' + 'eu-west').
+CREATE TABLE IF NOT EXISTS server_groups (
+  id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  name          VARCHAR(64)  NOT NULL,
+  description   VARCHAR(255) NULL,
+  created_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_server_groups_name (name)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS server_group_members (
+  server_group_id BIGINT UNSIGNED NOT NULL,
+  server_id       BIGINT UNSIGNED NOT NULL,
+  created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (server_group_id, server_id),
+  KEY idx_sgm_server (server_id),
+  CONSTRAINT fk_sgm_group  FOREIGN KEY (server_group_id) REFERENCES server_groups(id) ON DELETE CASCADE,
+  CONSTRAINT fk_sgm_server FOREIGN KEY (server_id)       REFERENCES servers(id)       ON DELETE CASCADE
+) ENGINE=InnoDB;
+
+-- ─────────────────────────────────────────────────────────────────────────
 -- applications — a managed process on a specific server
 -- ─────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS applications (
@@ -64,7 +91,8 @@ CREATE TABLE IF NOT EXISTS applications (
   server_id       BIGINT UNSIGNED NOT NULL,
   group_id        BIGINT UNSIGNED NULL,
 
-  runtime         ENUM('node','java') NOT NULL,
+  -- Phase 1 is Java-only. Node.js/PM2 support is deferred.
+  runtime         ENUM('java') NOT NULL DEFAULT 'java',
 
   -- Where to build:
   --   target     → build on the target server (agent does git/install/build)
@@ -94,9 +122,9 @@ CREATE TABLE IF NOT EXISTS applications (
   -- How start/stop/status is invoked on the target:
   --   wrapped → controller wraps start_cmd in setsid+nohup+PID file
   --   raw     → user provides full start/stop/status/logs commands
-  --   pm2     → pm2-managed (future)
   --   systemd → systemctl-managed (future)
-  launch_mode     ENUM('wrapped','raw','pm2','systemd') NOT NULL DEFAULT 'wrapped',
+  -- pm2 is deferred to phase 2 alongside Node.js runtime support.
+  launch_mode     ENUM('wrapped','raw','systemd') NOT NULL DEFAULT 'wrapped',
   status_cmd      VARCHAR(512)  NULL,
   logs_cmd        VARCHAR(512)  NULL,
   health_cmd      VARCHAR(512)  NULL,
@@ -106,6 +134,13 @@ CREATE TABLE IF NOT EXISTS applications (
   -- runtime state (updated by agent heartbeats / events)
   process_state   ENUM('running','stopped','crashed','starting','unknown')
                   NOT NULL DEFAULT 'unknown',
+  -- operator-expected state. Set by the orchestrator when start/stop/restart
+  -- jobs are enqueued and consulted by the alert detector to decide whether
+  -- a reported regression is actually unexpected.
+  expected_state  ENUM('running','stopped') NOT NULL DEFAULT 'stopped',
+  -- most recent alert-on-down notification for this app — used to debounce
+  -- duplicate pages while the app stays in the bad state.
+  last_alert_at   TIMESTAMP     NULL,
   pid             INT UNSIGNED  NULL,
   last_started_at TIMESTAMP     NULL,
   last_exit_code  INT           NULL,
@@ -168,7 +203,10 @@ CREATE TABLE IF NOT EXISTS jobs (
 
   action          ENUM('start','stop','restart','build','deploy','healthcheck')
                   NOT NULL,
-  target_type     ENUM('app','group','server') NOT NULL,
+  -- 'server_group' is added in migration 003; deploy fan-out to a named
+  -- bundle of servers writes one child job per member with target_type='app'
+  -- and a parent_job_id pointing at the server_group-level row.
+  target_type     ENUM('app','group','server','server_group') NOT NULL,
   application_id  BIGINT UNSIGNED NULL,
   group_id        BIGINT UNSIGNED NULL,
   server_id       BIGINT UNSIGNED NULL,

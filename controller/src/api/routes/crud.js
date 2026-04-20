@@ -17,8 +17,11 @@ import {
   AppCreate, AppUpdate,
   GroupCreate, GroupUpdate,
   ServerCreate, ServerUpdate,
+  ServerGroupCreate, ServerGroupUpdate,
 } from '@cp/shared/schemas';
-import { applications, groups, servers } from '../../db/repositories.js';
+import {
+  applications, groups, servers, serverGroups,
+} from '../../db/repositories.js';
 import { writeAudit } from '../../audit/audit.js';
 
 const actorOf = (req) => req.actor ?? 'unknown';
@@ -144,6 +147,67 @@ export function crudRouter({ getWsHub }) {
       await writeAudit({
         actor: actorOf(req), action: 'group.delete',
         targetType: 'group', targetId: String(id),
+        result: 'success', httpStatus: 204,
+      });
+      res.status(204).end();
+    } catch (e) { next(e); }
+  });
+
+  // ─── server-groups (deploy fan-out targets) ──────────────────────────
+  //
+  // `serverIds` is optional on create/update. When present it fully
+  // replaces the membership — simpler for the UI and matches how the
+  // dashboard posts the edited form. Membership is wiped automatically on
+  // DELETE via the ON DELETE CASCADE FK, no manual cleanup needed.
+  r.post('/server-groups', async (req, res, next) => {
+    try {
+      const body = parse(ServerGroupCreate, req.body);
+      const row = await serverGroups.create({
+        name: body.name, description: body.description,
+      });
+      if (body.serverIds) {
+        await serverGroups.replaceMembers(row.id, body.serverIds);
+      }
+      await writeAudit({
+        actor: actorOf(req), action: 'server-group.create',
+        targetType: 'server_group', targetId: String(row.id),
+        result: 'success', httpStatus: 201,
+        metadata: { name: body.name, members: body.serverIds?.length ?? 0 },
+      });
+      res.status(201).json(row);
+    } catch (e) {
+      if (e.code === 'ER_DUP_ENTRY') return next(new ConflictError('server-group name already exists'));
+      next(e);
+    }
+  });
+
+  r.patch('/server-groups/:id', async (req, res, next) => {
+    try {
+      const id = parseId(req.params.id);
+      const patch = parse(ServerGroupUpdate, req.body);
+      const { serverIds, ...metaPatch } = patch;
+      const row = await serverGroups.update(id, metaPatch);
+      if (serverIds) await serverGroups.replaceMembers(id, serverIds);
+      await writeAudit({
+        actor: actorOf(req), action: 'server-group.update',
+        targetType: 'server_group', targetId: String(id),
+        result: 'success', httpStatus: 200,
+        metadata: {
+          fields: diffKeys(metaPatch),
+          members: serverIds ? serverIds.length : undefined,
+        },
+      });
+      res.json(row);
+    } catch (e) { next(e); }
+  });
+
+  r.delete('/server-groups/:id', async (req, res, next) => {
+    try {
+      const id = parseId(req.params.id);
+      await serverGroups.delete(id);
+      await writeAudit({
+        actor: actorOf(req), action: 'server-group.delete',
+        targetType: 'server_group', targetId: String(id),
         result: 'success', httpStatus: 204,
       });
       res.status(204).end();
