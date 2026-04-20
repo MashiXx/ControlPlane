@@ -1,5 +1,11 @@
--- ControlPlane — MySQL 8 schema
+-- ControlPlane — MySQL 8 schema (agentless)
 -- Charset: utf8mb4 throughout. Engine: InnoDB for transactional integrity.
+--
+-- Reflects migrations 001 → 004. The controller now drives every target
+-- action over SSH; there is no per-server agent process, no bearer token,
+-- no HTTP artifact pull. Connection details (User / Port / IdentityFile /
+-- ProxyJump) live in the controller's ~/.ssh/config — nothing is per-server
+-- in the DB except the hostname alias.
 
 SET NAMES utf8mb4;
 
@@ -21,36 +27,26 @@ CREATE TABLE IF NOT EXISTS `groups` (
 ) ENGINE=InnoDB;
 
 -- ─────────────────────────────────────────────────────────────────────────
--- servers — physical or virtual hosts running an agent
+-- servers — target hosts the controller drives over SSH
 -- ─────────────────────────────────────────────────────────────────────────
+-- `hostname` is passed as-is to `ssh` and `rsync`, so it can be a DNS name,
+-- a raw IP, or — most usefully — a Host alias from the controller's
+-- ~/.ssh/config. All connection details live there.
 CREATE TABLE IF NOT EXISTS servers (
   id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   name            VARCHAR(64)   NOT NULL,
-  -- Hostname OR an SSH Host alias defined in the controller's ~/.ssh/config.
-  -- When artifact_transfer='rsync' this is passed as-is to `ssh <hostname>`
-  -- and `rsync ... <hostname>:...`, so OpenSSH resolves User / Port /
-  -- IdentityFile / ProxyJump / HostName from ~/.ssh/config.
   hostname        VARCHAR(255)  NOT NULL,
-  -- SHA-256 hash of the bearer token the agent presents on connect.
-  -- Raw token is shown to the operator exactly once at provisioning time.
-  auth_token_hash CHAR(64)      NOT NULL,
-  -- operational state
+  -- operational state, updated by the controller's state poller
   status          ENUM('online','offline','unreachable','draining')
                   NOT NULL DEFAULT 'offline',
   last_seen_at    TIMESTAMP     NULL,
-  agent_version   VARCHAR(32)   NULL,
   os              VARCHAR(64)   NULL,
   -- free-form JSON for labels like {"region":"eu","env":"prod"}
   labels          JSON          NULL,
-  -- how artifacts reach this server:
-  --   http  → agent pulls via HTTP from controller (default; for WS agents)
-  --   rsync → controller pushes via rsync+ssh using `hostname` as target
-  artifact_transfer ENUM('http','rsync') NOT NULL DEFAULT 'http',
   created_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uq_servers_name (name),
-  UNIQUE KEY uq_servers_token (auth_token_hash),
   KEY idx_servers_status (status),
   KEY idx_servers_last_seen (last_seen_at)
 ) ENGINE=InnoDB;
@@ -60,8 +56,7 @@ CREATE TABLE IF NOT EXISTS servers (
 -- ─────────────────────────────────────────────────────────────────────────
 -- Separate from `groups` (which groups *applications*). A server_group is
 -- purely a rollout concept: "deploy app X to server_group eu-payments" fans
--- out into one deploy job per member server. Membership is many-to-many;
--- the same server can belong to several groups (e.g. 'canary' + 'eu-west').
+-- out into one deploy job per member server. Membership is many-to-many.
 CREATE TABLE IF NOT EXISTS server_groups (
   id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   name          VARCHAR(64)  NOT NULL,
@@ -94,11 +89,10 @@ CREATE TABLE IF NOT EXISTS applications (
   -- Phase 1 is Java-only. Node.js/PM2 support is deferred.
   runtime         ENUM('java') NOT NULL DEFAULT 'java',
 
-  -- Where to build:
-  --   target     → build on the target server (agent does git/install/build)
-  --   controller → build on the controller host, copy artifact to target
-  --   builder    → route build to a designated builder server (future)
-  build_strategy  ENUM('target','controller','builder') NOT NULL DEFAULT 'target',
+  -- Controller-only: build on the controller host, rsync the artifact to the
+  -- target. Kept as an enum so re-introducing alternate strategies is a
+  -- one-value change rather than a column-shape change.
+  build_strategy  ENUM('controller') NOT NULL DEFAULT 'controller',
   -- Glob, relative to the build workdir, used to collect the artifact.
   -- Example: 'target/*.jar' or 'dist/**'
   artifact_pattern     VARCHAR(255) NULL,
@@ -106,40 +100,33 @@ CREATE TABLE IF NOT EXISTS applications (
   --   <remote_install_path>/releases/<build_id>/
   --   <remote_install_path>/current → symlink to active release
   remote_install_path  VARCHAR(512) NULL,
-  builder_server_id    BIGINT UNSIGNED NULL,
 
   -- git
   repo_url        VARCHAR(512)  NULL,
   branch          VARCHAR(128)  NOT NULL DEFAULT 'main',
-  -- Absolute path on the target server. Must be inside AGENT_WORKDIR.
+  -- Absolute path on the target server. start_cmd, stop_cmd etc. are invoked
+  -- in <remote_install_path>/current; workdir is the build workspace only.
   workdir         VARCHAR(512)  NOT NULL,
-  -- Shell-quoted commands. Only built-in templates are accepted unless
-  -- the app is flagged as trusted (see `trusted` below).
   install_cmd     VARCHAR(512)  NULL,
   build_cmd       VARCHAR(512)  NULL,
   start_cmd       VARCHAR(512)  NOT NULL,
   stop_cmd        VARCHAR(512)  NULL,
   -- How start/stop/status is invoked on the target:
-  --   wrapped → controller wraps start_cmd in setsid+nohup+PID file
+  --   wrapped → controller synthesizes setsid+nohup wrapper + PID file
   --   raw     → user provides full start/stop/status/logs commands
-  --   systemd → systemctl-managed (future)
-  -- pm2 is deferred to phase 2 alongside Node.js runtime support.
+  --   systemd → systemctl-managed
   launch_mode     ENUM('wrapped','raw','systemd') NOT NULL DEFAULT 'wrapped',
   status_cmd      VARCHAR(512)  NULL,
   logs_cmd        VARCHAR(512)  NULL,
   health_cmd      VARCHAR(512)  NULL,
-  -- env vars are serialized as JSON object, opaque to the controller
   env             JSON          NULL,
 
-  -- runtime state (updated by agent heartbeats / events)
+  -- runtime state, updated by the controller's state poller
   process_state   ENUM('running','stopped','crashed','starting','unknown')
                   NOT NULL DEFAULT 'unknown',
   -- operator-expected state. Set by the orchestrator when start/stop/restart
-  -- jobs are enqueued and consulted by the alert detector to decide whether
-  -- a reported regression is actually unexpected.
+  -- jobs are enqueued; consulted by the alert detector.
   expected_state  ENUM('running','stopped') NOT NULL DEFAULT 'stopped',
-  -- most recent alert-on-down notification for this app — used to debounce
-  -- duplicate pages while the app stays in the bad state.
   last_alert_at   TIMESTAMP     NULL,
   pid             INT UNSIGNED  NULL,
   last_started_at TIMESTAMP     NULL,
@@ -147,7 +134,6 @@ CREATE TABLE IF NOT EXISTS applications (
   last_exit_at    TIMESTAMP     NULL,
   uptime_seconds  BIGINT UNSIGNED NULL,
 
-  -- controls whether raw (non-templated) commands are permitted for this app
   trusted         TINYINT(1)    NOT NULL DEFAULT 0,
   enabled         TINYINT(1)    NOT NULL DEFAULT 1,
 
@@ -159,10 +145,8 @@ CREATE TABLE IF NOT EXISTS applications (
   KEY idx_applications_group   (group_id),
   KEY idx_applications_server  (server_id),
   KEY idx_applications_state   (process_state),
-  KEY idx_applications_builder (builder_server_id),
-  CONSTRAINT fk_applications_server  FOREIGN KEY (server_id)         REFERENCES servers(id)   ON DELETE RESTRICT,
-  CONSTRAINT fk_applications_group   FOREIGN KEY (group_id)          REFERENCES `groups`(id) ON DELETE SET NULL,
-  CONSTRAINT fk_applications_builder FOREIGN KEY (builder_server_id) REFERENCES servers(id)   ON DELETE SET NULL
+  CONSTRAINT fk_applications_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_applications_group  FOREIGN KEY (group_id)  REFERENCES `groups`(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
 -- ─────────────────────────────────────────────────────────────────────────
@@ -173,10 +157,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
   application_id  BIGINT UNSIGNED NOT NULL,
   commit_sha      CHAR(40)      NULL,
   branch          VARCHAR(128)  NOT NULL,
-  -- sha256 of (install_cmd|build_cmd|artifact_pattern) — so config changes
-  -- force a rebuild even if commit is unchanged.
   config_hash     CHAR(64)      NOT NULL,
-  -- sha256 of the tar.gz body, used for integrity check on deploy
   sha256          CHAR(64)      NOT NULL,
   path            VARCHAR(512)  NOT NULL,
   size_bytes      BIGINT UNSIGNED NOT NULL,
@@ -195,17 +176,12 @@ CREATE TABLE IF NOT EXISTS artifacts (
 -- ─────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS jobs (
   id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  -- In-process queue job id (string). Unique so the worker and API can dedupe.
   queue_job_id    VARCHAR(64)   NOT NULL,
-  -- Parent job, used when a group action fans out into N per-app jobs.
   parent_job_id   BIGINT UNSIGNED NULL,
   idempotency_key VARCHAR(128)  NULL,
 
   action          ENUM('start','stop','restart','build','deploy','healthcheck')
                   NOT NULL,
-  -- 'server_group' is added in migration 003; deploy fan-out to a named
-  -- bundle of servers writes one child job per member with target_type='app'
-  -- and a parent_job_id pointing at the server_group-level row.
   target_type     ENUM('app','group','server','server_group') NOT NULL,
   application_id  BIGINT UNSIGNED NULL,
   group_id        BIGINT UNSIGNED NULL,
@@ -216,14 +192,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   attempts        INT UNSIGNED  NOT NULL DEFAULT 0,
   max_attempts    INT UNSIGNED  NOT NULL DEFAULT 3,
 
-  -- user who triggered the job. Possible actor strings:
-  --   "telegram:<chat_id>"  — Telegram bot command (in-process)
-  --   "web"                 — dashboard SPA (cookie-session auth; single-user)
-  --   "api:<token-name>"    — external script via CONTROLLER_API_TOKENS bearer
-  --   "agent:<id>"          — agent-initiated event (e.g. agent.connect)
-  --   "system"              — controller-internal trigger
   triggered_by    VARCHAR(128)  NOT NULL,
-  -- request payload (as submitted) and final result (stdout/stderr, timings)
   payload         JSON          NULL,
   result          JSON          NULL,
   error_message   TEXT          NULL,
@@ -253,17 +222,15 @@ CREATE TABLE IF NOT EXISTS audit_logs (
   id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   occurred_at     TIMESTAMP(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
 
-  actor           VARCHAR(128)  NOT NULL,   -- see jobs.triggered_by for the actor format
-  action          VARCHAR(64)   NOT NULL,   -- "restart","build","deploy","agent.connect", ...
-  target_type     VARCHAR(32)   NOT NULL,   -- "app","group","server","job"
-  target_id       VARCHAR(64)   NULL,       -- stringified id or name
+  actor           VARCHAR(128)  NOT NULL,
+  action          VARCHAR(64)   NOT NULL,
+  target_type     VARCHAR(32)   NOT NULL,
+  target_id       VARCHAR(64)   NULL,
   job_id          BIGINT UNSIGNED NULL,
 
   result          ENUM('success','failure','info') NOT NULL,
   http_status     SMALLINT UNSIGNED NULL,
-  -- last ~8KB of stdout/stderr or controller-side message
   message         TEXT          NULL,
-  -- structured metadata (ip, user-agent, diff, etc.)
   metadata        JSON          NULL,
 
   PRIMARY KEY (id),
@@ -285,13 +252,13 @@ CREATE TABLE IF NOT EXISTS deployments (
   commit_sha      CHAR(40)      NULL,
   branch          VARCHAR(128)  NOT NULL,
   artifact_id     BIGINT UNSIGNED NULL,
-  release_id      VARCHAR(64)   NULL,  -- <unix_ts>-<short_sha>, becomes dir name on target
-  previous_release_id VARCHAR(64) NULL, -- what `current` symlink pointed at before
+  release_id      VARCHAR(64)   NULL,
+  previous_release_id VARCHAR(64) NULL,
   status          ENUM('pending','building','deployed','failed','rolled_back')
                   NOT NULL DEFAULT 'pending',
 
-  build_log_ref   VARCHAR(255)  NULL,  -- pointer to object storage / file path
-  artifact_path   VARCHAR(512)  NULL,  -- resolved artifact on disk
+  build_log_ref   VARCHAR(255)  NULL,
+  artifact_path   VARCHAR(512)  NULL,
   deployed_at     TIMESTAMP     NULL,
   rolled_back_at  TIMESTAMP     NULL,
   created_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -309,16 +276,12 @@ CREATE TABLE IF NOT EXISTS deployments (
 
 -- ─────────────────────────────────────────────────────────────────────────
 -- api_tokens — reserved for future per-token DB-backed auth.
--- Currently UNUSED by the runtime: the controller reads bearer tokens from
--- the CONTROLLER_API_TOKENS env var and the dashboard uses cookie sessions
--- (DASHBOARD_PASSWORD_HASH). Keep the table so the migration path exists
--- when we want rotatable, scoped tokens with a revoke audit trail.
 -- ─────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS api_tokens (
   id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   name            VARCHAR(64)   NOT NULL,
   token_hash      CHAR(64)      NOT NULL,
-  scopes          JSON          NOT NULL,  -- e.g. ["apps:read","jobs:write"]
+  scopes          JSON          NOT NULL,
   created_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   last_used_at    TIMESTAMP     NULL,
   revoked_at      TIMESTAMP     NULL,

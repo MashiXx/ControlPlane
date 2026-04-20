@@ -26,7 +26,7 @@ export async function openServerGroupForm({ initial, servers, onSaved }) {
           <input type="checkbox" name="serverIds" value="${s.id}"
             ${currentMemberIds.has(s.id) ? 'checked' : ''}>
           ${escape(s.name)}
-          <small>${escape(s.hostname)} · ${escape(s.artifact_transfer)}</small>
+          <small>${escape(s.hostname)}</small>
         </label>`).join('');
 
   form.innerHTML = `

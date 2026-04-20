@@ -1,45 +1,60 @@
-// In-process worker that processes queued actions.
+// In-process worker. Post-agentless there are two branches:
 //
-// Three branches per job, selected from job.data:
+//   1. BUILD  (on controller): run builder.runBuild locally; on success,
+//      enqueue one DEPLOY per target server carrying artifactId+releaseId.
 //
-//   1. build (on controller): run builder.runBuild locally; on success,
-//      enqueue a follow-up deploy job carrying the artifactId.
+//   2. DEPLOY / START / STOP / RESTART / HEALTHCHECK: call the matching
+//      remoteExec function. deploy additionally reads the artifact row and
+//      passes it to deployAction; everything else is a direct dispatch.
 //
-//   2. deploy with controller-built artifact: prepare the transfer
-//      (HTTP token or rsync push), then dispatch to the agent with an
-//      artifact descriptor. Agent handles swap+restart.
-//
-//   3. Anything else (start/stop/restart/healthcheck/target-build deploy):
-//      dispatch to the agent over the WS hub. This is the original flow.
-//
-// Shared semantics:
+// Shared semantics (unchanged from the agent era):
 //   - Mark `jobs` row running on entry, final state on exit.
-//   - Agent-unavailable bubbles as TransientError → the queue retries once
-//     the agent reconnects.
-//   - Permanent errors (wrapped upstream by createWorker) fail the job.
+//   - Retry on TransientError via the queue; PermanentError fails fast.
+//   - Every terminal status writes an audit_logs row.
 
 import { createWorker, enqueueAction, jobIdentity } from '@cp/queue';
 import {
-  BuildStrategy, JobAction, JobTargetType, QueueName, RetryProfile,
+  JobAction, JobTargetType, QueueName, RetryProfile,
 } from '@cp/shared/constants';
-import {
-  AgentUnavailableError, PermanentError, ValidationError, serializeError,
-} from '@cp/shared/errors';
+import { PermanentError, serializeError } from '@cp/shared/errors';
+import { createLogger } from '@cp/shared/logger';
+
 import {
   applications, servers, artifacts as artifactsRepo, jobs as jobsRepo, deployments,
 } from '../db/repositories.js';
 import { writeAudit } from '../audit/audit.js';
-import { createLogger } from '@cp/shared/logger';
 
 import { ArtifactStore } from '../build/artifactStore.js';
 import { runBuild } from '../build/builder.js';
-import { prepareArtifactForTarget } from '../transport/artifactTransfer.js';
+import {
+  startAction, stopAction, restartAction, healthcheckAction, deployAction,
+} from '../exec/remoteExec.js';
 
 const logger = createLogger({ service: 'controller.worker' });
 
-export function startWorkers({ hub, dispatchTimeoutMs, config }) {
+// Maps a job.action to the matching remoteExec function. Excludes BUILD
+// (handled inline) and DEPLOY (needs artifact hydration first).
+const EXEC_FOR_ACTION = Object.freeze({
+  [JobAction.START]:       startAction,
+  [JobAction.STOP]:        stopAction,
+  [JobAction.RESTART]:     restartAction,
+  [JobAction.HEALTHCHECK]: healthcheckAction,
+});
+
+export function startWorkers({ broadcastUi, config }) {
   const store = new ArtifactStore({ baseDir: config.artifactStoreDir });
   store.ensure().catch((err) => logger.error({ err: err.message }, 'store:ensure-failed'));
+
+  const makeLogStreamer = (queueJobId) => ({ stream, data }) => {
+    try {
+      broadcastUi?.({
+        op: 'log:chunk',
+        jobId: queueJobId,
+        stream,
+        dataB64: Buffer.isBuffer(data) ? data.toString('base64') : Buffer.from(String(data)).toString('base64'),
+      });
+    } catch { /* noop */ }
+  };
 
   const processor = async (job) => {
     const { action, targetId, triggeredBy, payload } = job.data;
@@ -51,10 +66,12 @@ export function startWorkers({ hub, dispatchTimeoutMs, config }) {
       throw new PermanentError(`app ${app.name} is disabled`, { code: 'E_APP_DISABLED' });
     }
 
+    const onChunk = makeLogStreamer(queueJobId);
+
     try {
-      // Branch 1: build on controller host
-      if (action === JobAction.BUILD && app.build_strategy === BuildStrategy.CONTROLLER) {
-        const r = await runControllerBuild({ job, app, triggeredBy, payload, store, config });
+      // ─── BUILD ──────────────────────────────────────────────────────
+      if (action === JobAction.BUILD) {
+        const r = await runControllerBuild({ job, app, triggeredBy, payload, store, config, onChunk });
         await jobsRepo.markFinished(queueJobId, 'success', { result: r });
         await writeAudit({
           actor: triggeredBy, action: 'build.controller', targetType: 'app',
@@ -64,24 +81,31 @@ export function startWorkers({ hub, dispatchTimeoutMs, config }) {
         return r;
       }
 
-      // Branch 2: deploy an already-built artifact to a target server
-      if (action === JobAction.DEPLOY && payload?.artifactId) {
-        const r = await runControllerDeploy({
-          job, app, triggeredBy, payload, hub, dispatchTimeoutMs, config,
-        });
+      // ─── DEPLOY ─────────────────────────────────────────────────────
+      if (action === JobAction.DEPLOY) {
+        const r = await runDeploy({ job, app, triggeredBy, payload, onChunk });
         await jobsRepo.markFinished(queueJobId, 'success', { result: r });
         await writeAudit({
-          actor: triggeredBy, action: 'deploy.controller', targetType: 'app',
+          actor: triggeredBy, action: 'deploy', targetType: 'app',
           targetId: String(app.id), result: 'success',
           message: `release=${r.releaseId} artifact=${r.artifactId}`,
         });
         return r;
       }
 
-      // Branch 3: anything else — dispatch to agent unchanged
-      const result = await dispatchToAgent({
-        job, app, triggeredBy, hub, dispatchTimeoutMs,
-      });
+      // ─── START / STOP / RESTART / HEALTHCHECK ───────────────────────
+      const exec = EXEC_FOR_ACTION[action];
+      if (!exec) {
+        throw new PermanentError(`unsupported action: ${action}`, { code: 'E_UNSUPPORTED_ACTION' });
+      }
+      // serverIdOverride is carried through for server-group fan-outs
+      // (restart-after-failed-deploy style flows). For single-app actions
+      // the app's home server is used.
+      const server = await servers.get(
+        payload?.serverIdOverride ?? app.server_id,
+      );
+      const effectiveApp = { ...app, server_id: server.id };
+      const result = await exec(effectiveApp, { onChunk });
       await jobsRepo.markFinished(queueJobId, 'success', {
         result: {
           exitCode:   result.exitCode ?? 0,
@@ -117,16 +141,16 @@ export function startWorkers({ hub, dispatchTimeoutMs, config }) {
   return workers;
 }
 
-// ─── Branch 1: build on controller ──────────────────────────────────────
-async function runControllerBuild({ job, app, triggeredBy, payload, store, config }) {
-  if (app.build_strategy !== BuildStrategy.CONTROLLER) {
-    throw new PermanentError(
-      `build-on-controller requested but app.build_strategy=${app.build_strategy}`,
-    );
-  }
-
+// ─── BUILD branch ───────────────────────────────────────────────────────
+async function runControllerBuild({ job, app, triggeredBy, payload, store, config, onChunk }) {
   const buildJobDbRow = await jobsRepo.getByQueueJobId(job.id);
   const buildJobDbId = buildJobDbRow?.id ?? 0;
+
+  // builder.runBuild calls its onChunk as (buf, stream); our downstream
+  // broadcast expects ({ stream, data }). Bridge between the two shapes.
+  const builderChunk = onChunk
+    ? (buf, stream) => onChunk({ stream: stream ?? 'stdout', data: buf })
+    : undefined;
 
   const { artifact, reused, buildId } = await runBuild({
     app, store,
@@ -134,29 +158,22 @@ async function runControllerBuild({ job, app, triggeredBy, payload, store, confi
     buildJobDbId,
     commitSha: payload?.commitSha,
     workdirBase: config?.buildWorkdirBase,
+    onChunk: builderChunk,
   });
 
   const releaseId = buildId ?? `${Math.floor(Date.now() / 1000)}-${(artifact.commit_sha ?? 'na').slice(0, 7)}`;
 
   // When the orchestrator targeted a server_group, payload.deployServerIds
-  // carries the fan-out list. Otherwise we deploy to the app's home server
-  // (classic single-target flow). Either way the same artifact is reused;
-  // the artifact store is content-addressed, not server-scoped.
+  // carries the fan-out list. Otherwise deploy to the app's home server.
   const targetServerIds = Array.isArray(payload?.deployServerIds) && payload.deployServerIds.length
     ? payload.deployServerIds
     : [app.server_id];
 
   const deployEnqueues = [];
   for (const targetServerId of targetServerIds) {
-    // Precompute identity → insert DB row → enqueue. Same reason as the
-    // orchestrator: the in-process queue dispatches workers synchronously
-    // from `add()`, so any reversed order races the row lookup.
     const enqInput = {
       action: JobAction.DEPLOY,
       targetType: JobTargetType.APP,
-      // Include the target server in the id so fan-out to N servers produces
-      // N distinct queue job ids. Without this the idempotency key collapses
-      // all N deploys into one for a single-app fan-out.
       targetId: `${app.id}@${targetServerId}`,
       triggeredBy,
       payload: {
@@ -202,22 +219,18 @@ async function runControllerBuild({ job, app, triggeredBy, payload, store, confi
   };
 }
 
-// ─── Branch 2: deploy controller-built artifact ─────────────────────────
-async function runControllerDeploy({ job, app, triggeredBy, payload, hub, dispatchTimeoutMs, config }) {
-  // serverIdOverride is set by the build phase when the orchestrator targeted
-  // a server_group, so the same artifact can be delivered to several servers
-  // without each deploy re-reading the app row for app.server_id.
+// ─── DEPLOY branch ──────────────────────────────────────────────────────
+async function runDeploy({ job, app, triggeredBy, payload, onChunk }) {
+  if (!payload?.artifactId) {
+    throw new PermanentError('deploy job missing artifactId — build chaining broken', {
+      code: 'E_DEPLOY_NO_ARTIFACT',
+    });
+  }
   const targetServerId = payload.serverIdOverride ?? app.server_id;
   const server = await servers.get(targetServerId);
   const artifact = await artifactsRepo.get(payload.artifactId);
-  const releaseId = payload.releaseId ?? `${Math.floor(Date.now() / 1000)}-${(artifact.commit_sha ?? 'na').slice(0, 7)}`;
-
-  const descriptor = await prepareArtifactForTarget({
-    server, app, artifact, releaseId,
-    secret:        config.artifactSecret,
-    publicBaseUrl: config.publicBaseUrl,
-    stagingBase:   config.rsyncStagingDir,
-  });
+  const releaseId = payload.releaseId
+    ?? `${Math.floor(Date.now() / 1000)}-${(artifact.commit_sha ?? 'na').slice(0, 7)}`;
 
   const jobDbRow = await jobsRepo.getByQueueJobId(job.id);
   const deployId = await deployments.insert({
@@ -232,24 +245,22 @@ async function runControllerDeploy({ job, app, triggeredBy, payload, hub, dispat
     if (err?.code === 'ER_DUP_ENTRY') return null; throw err;
   });
 
-  const executeFrame = {
-    jobId:  job.id,
-    action: JobAction.DEPLOY,
-    app:    appToFrame(app),
-    artifact: descriptor,
-    timeoutMs: dispatchTimeoutMs,
-  };
-
   try {
-    const result = await hub.executeAndWait(server.id, executeFrame, {
-      timeoutMs: dispatchTimeoutMs,
-    });
+    // deployAction resolves the host from app.server_id; override just for
+    // this invocation so fan-out deploys hit the right server.
+    const result = await deployAction(
+      { ...app, server_id: server.id },
+      artifact,
+      releaseId,
+      { onChunk },
+    );
     if (deployId) await deployments.markDeployed(deployId).catch(() => {});
     return {
       artifactId: artifact.id,
       releaseId,
       exitCode: result.exitCode ?? 0,
       stdoutTail: result.stdoutTail?.slice(-4096),
+      stderrTail: result.stderrTail?.slice(-4096),
     };
   } catch (err) {
     if (deployId) await deployments.markFailed(deployId).catch(() => {});
@@ -257,52 +268,6 @@ async function runControllerDeploy({ job, app, triggeredBy, payload, hub, dispat
   }
 }
 
-// ─── Branch 3: generic dispatch (start/stop/restart/etc) ────────────────
-async function dispatchToAgent({ job, app, hub, dispatchTimeoutMs }) {
-  // serverIdOverride is carried through for actions invoked as part of a
-  // server-group fan-out; for the normal single-target case it's unset and
-  // we fall back to the app's home server.
-  const targetServerId = job.data.payload?.serverIdOverride ?? app.server_id;
-  const server = await servers.get(targetServerId);
-  const executeFrame = {
-    jobId: job.id,
-    action: job.data.action,
-    app: appToFrame(app),
-    timeoutMs: dispatchTimeoutMs,
-  };
-  return hub.executeAndWait(server.id, executeFrame, { timeoutMs: dispatchTimeoutMs });
-}
-
-// ─── helpers ────────────────────────────────────────────────────────────
-function appToFrame(app) {
-  return {
-    id: app.id,
-    name: app.name,
-    runtime: app.runtime,
-    workdir: app.workdir,
-    remoteInstallPath: app.remote_install_path ?? undefined,
-    buildStrategy:     app.build_strategy ?? 'target',
-    launchMode:        app.launch_mode ?? 'wrapped',
-    installCmd: app.install_cmd ?? undefined,
-    buildCmd:   app.build_cmd   ?? undefined,
-    startCmd:   app.start_cmd,
-    stopCmd:    app.stop_cmd    ?? undefined,
-    statusCmd:  app.status_cmd  ?? undefined,
-    logsCmd:    app.logs_cmd    ?? undefined,
-    healthCmd:  app.health_cmd  ?? undefined,
-    repoUrl:    app.repo_url    ?? undefined,
-    branch:     app.branch,
-    env:        app.env ? safeJson(app.env) : undefined,
-    trusted:    Boolean(app.trusted),
-  };
-}
-
 function combine(a, b) {
   return [a, b].filter(Boolean).join('\n---stderr---\n');
-}
-
-function safeJson(v) {
-  if (v == null) return undefined;
-  if (typeof v === 'string') { try { return JSON.parse(v); } catch { return undefined; } }
-  return v;
 }

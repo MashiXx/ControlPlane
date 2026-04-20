@@ -9,7 +9,8 @@ const codeToStatus = {
   E_AUTH:            401,
   E_CONFLICT:        409,
   E_CMD_NOT_ALLOWED: 400,
-  E_AGENT_UNAVAILABLE: 503,
+  E_SSH_CONNECT:     503,
+  E_SSH_TIMEOUT:     504,
   E_TIMEOUT:         504,
 };
 

@@ -1,60 +1,61 @@
-// Controller entrypoint: wires DB pool, HTTP server (REST + cookie-session
-// auth + SPA static), WS hub (/agent + /ui), in-process job workers, and
-// the in-process Telegram bot (started only when TELEGRAM_TOKEN is set).
+// Controller entrypoint. Wires:
+//   - DB pool
+//   - HTTP server (REST + cookie-session auth + SPA static)
+//   - /ui WebSocket hub (dashboard live updates)
+//   - in-process job workers (four named queues)
+//   - state scheduler (SSH poll every STATE_POLL_INTERVAL_MS)
+//   - in-process Telegram bot (started only when TELEGRAM_TOKEN is set)
+//
+// There is no longer an /agent WS endpoint, no agent-side bearer token, and
+// no artifact HTTP blob route — rsync+ssh is the only artifact path, driven
+// directly by the worker + state scheduler.
 
 import http from 'node:http';
 import { createLogger } from '@cp/shared/logger';
-import { HEARTBEAT_INTERVAL_MS } from '@cp/shared/constants';
 import { serializeError } from '@cp/shared/errors';
 import { closeAll as closeQueues } from '@cp/queue';
 
 import { loadControllerConfig } from './config.js';
 import { initPool, closePool } from './db/pool.js';
 import { buildHttpApp } from './api/server.js';
-import { WsHub } from './ws/hub.js';
+import { UiHub } from './ws/uiHub.js';
 import { startWorkers } from './workers/jobWorker.js';
 import { startBot } from './bot/start.js';
 import { AlertManager } from './alerts/alertManager.js';
+import { StateScheduler } from './pollers/stateScheduler.js';
 
 const logger = createLogger({ service: 'controller' });
 const config = loadControllerConfig();
 
 initPool(config.db);
 
-// Late-bound reference the CRUD router uses for token rotation.
-let hub;
 const app = buildHttpApp({
   apiTokens: config.apiTokens,
-  artifactSecret: config.artifactSecret,
-  publicBaseUrl: config.publicBaseUrl,
   sessionSecret: config.jwtSecret,
   dashboardPasswordHash: config.dashboardPasswordHash,
   isProd: config.isProd,
-  getWsHub: () => hub,
 });
 const httpServer = http.createServer(app);
 
-// The alert manager needs to broadcast to the dashboard (via the hub's UI
-// channel) and, when the bot is running, to Telegram admins. We build it up
-// in stages: construct with a broadcast hook bound to the hub, then wire in
-// the bot's notifier after startBot returns.
-const alertManager = new AlertManager({
-  broadcastUi: (frame) => hub?.broadcastUi(frame),
-});
+// UI hub first — everything else broadcasts through it.
+const uiHub = new UiHub({ httpServer, sessionSecret: config.jwtSecret });
 
-hub = new WsHub({
-  httpServer,
-  heartbeatMs: HEARTBEAT_INTERVAL_MS,
-  sessionSecret: config.jwtSecret,
-  alertManager,
+// Alert manager broadcasts to the dashboard + (when the bot is up) Telegram.
+const alertManager = new AlertManager({
+  broadcastUi: (frame) => uiHub.broadcast(frame),
 });
-hub.startHeartbeatMonitor();
 
 const workers = startWorkers({
-  hub,
-  dispatchTimeoutMs: config.jobDispatchTimeoutMs,
+  broadcastUi: (frame) => uiHub.broadcast(frame),
   config,
 });
+
+// State scheduler — periodic SSH probe that replaces agent heartbeats.
+const stateScheduler = new StateScheduler({
+  alertManager,
+  broadcastUi: (frame) => uiHub.broadcast(frame),
+});
+stateScheduler.start();
 
 const botLogger = createLogger({ service: 'bot' });
 const bot = startBot({ logger: botLogger });
@@ -70,7 +71,8 @@ const shutdown = async (signal) => {
   logger.info({ signal }, 'controller:shutdown');
   try {
     httpServer.close();
-    hub.stop();
+    stateScheduler.stop();
+    uiHub.stop();
     await bot.stop();
     await Promise.all(workers.map((w) => w.close().catch(() => {})));
     await closeQueues();

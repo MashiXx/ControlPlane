@@ -8,13 +8,15 @@
 //   - server_group → one application deployed to every server in a
 //                    server-group (build once, deploy N times)
 //
-// Side-effect worth calling out: every successful enqueue *also* updates
+// Every deploy is two-phase (build on controller → fan out deploy jobs) now
+// that agent-side build is gone.
+//
+// Side-effect: every successful enqueue also updates
 // `applications.expected_state` so the alert detector knows whether a
 // subsequent regression is operator-induced (no alert) or a real outage.
 
 import { enqueueAction, jobIdentity } from '@cp/queue';
 import {
-  BuildStrategy,
   ExpectedState,
   JobAction, JobActions, JobTargetType, ProcessState, RetryProfile,
 } from '@cp/shared/constants';
@@ -75,24 +77,20 @@ async function enqueueOne(action, app, triggeredBy, options) {
   }
   if (!app.enabled) throw new ValidationError(`app ${app.name} is disabled`);
   if (action === JobAction.RESTART && app.process_state === ProcessState.UNKNOWN) {
-    // Allowed, but logged — the agent will sort it out.
+    // Allowed, but logged — the poller will reconcile after the restart.
   }
 
-  // Special-case: deploy on an app that builds on controller is two-phase:
-  //   1. BUILD job (runs locally on controller)
-  //   2. DEPLOY job (enqueued by the build worker on success)
-  // We only enqueue the BUILD here; the chain is driven by the worker.
-  if (action === JobAction.DEPLOY && app.build_strategy === BuildStrategy.CONTROLLER) {
+  // Every deploy is two-phase: enqueue a BUILD here; the build worker chains
+  // one DEPLOY per target server.
+  if (action === JobAction.DEPLOY) {
     return enqueueControllerBuild(app, triggeredBy, options);
   }
 
   const profile = RetryProfile[action];
 
   // Commit the DB row BEFORE enqueueing. The in-process queue fires workers
-  // synchronously from `add()`, so any worker path that looks up the jobs row
-  // by queueJobId would race against the insert and see NULL if we enqueued
-  // first (→ cascading FK failures when the worker inserts child rows like
-  // `artifacts.build_job_id`).
+  // synchronously from `add()`, so the worker's row lookup would race an
+  // insert-after-enqueue.
   const enqInput = {
     action,
     targetType: JobTargetType.APP,
@@ -138,6 +136,11 @@ async function enqueueOne(action, app, triggeredBy, options) {
 async function enqueueControllerBuild(
   app, triggeredBy, options, { deployServerIds, serverGroupName } = {},
 ) {
+  if (!app.repo_url || !app.artifact_pattern || !app.remote_install_path) {
+    throw new ValidationError(
+      `deploy requires repo_url, artifact_pattern and remote_install_path (app ${app.name})`,
+    );
+  }
   const profile = RetryProfile[JobAction.BUILD];
 
   // DB row before queue push — see comment in enqueueOne for the race.
@@ -150,8 +153,7 @@ async function enqueueControllerBuild(
       appName: app.name,
       serverId: app.server_id,
       commitSha: options?.commitSha,
-      // When provided the build worker will chain one DEPLOY per server id
-      // rather than a single deploy against app.server_id.
+      // When provided the build worker chains one DEPLOY per server id.
       deployServerIds: deployServerIds ?? null,
       serverGroupName: serverGroupName ?? null,
       options,
@@ -189,7 +191,7 @@ async function enqueueControllerBuild(
     jobId, result: 'info',
     message: serverGroupName
       ? `build-then-deploy for ${app.name} → server-group ${serverGroupName} (${deployServerIds?.length ?? 0} servers)`
-      : `build-then-deploy for ${app.name} (build_strategy=controller)`,
+      : `build-then-deploy for ${app.name}`,
     metadata: deployServerIds ? { serverGroupName, serverIds: deployServerIds } : undefined,
   });
 
@@ -207,8 +209,7 @@ async function enqueueControllerBuild(
 }
 
 // server_group deploy: build once on the controller, then fan out one deploy
-// per member server. Only supported for controller-built apps — agent-side
-// builds already live on a single server and can't be multiplexed.
+// per member server.
 async function enqueueServerGroupDeploy({ action, serverGroupRef, triggeredBy, options }) {
   if (action !== JobAction.DEPLOY) {
     throw new ValidationError(
@@ -221,11 +222,6 @@ async function enqueueServerGroupDeploy({ action, serverGroupRef, triggeredBy, o
   }
   const app = await resolveApp(appRef);
   if (!app.enabled) throw new ValidationError(`app ${app.name} is disabled`);
-  if (app.build_strategy !== BuildStrategy.CONTROLLER) {
-    throw new ValidationError(
-      `server_group deploy requires build_strategy='controller' (app ${app.name} uses '${app.build_strategy}')`,
-    );
-  }
 
   const sg = await resolveServerGroup(serverGroupRef);
   const memberIds = await serverGroups.listMemberIds(sg.id);
@@ -249,7 +245,6 @@ async function resolveApp(idOrName) {
   if (typeof idOrName === 'number' || /^\d+$/.test(String(idOrName))) {
     return applications.get(Number(idOrName));
   }
-  // fallback: linear scan (list is small) — could be optimized with a name index
   const all = await applications.list();
   const found = all.find((a) => a.name === idOrName);
   if (!found) throw new NotFoundError('application', idOrName);
