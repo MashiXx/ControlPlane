@@ -32,11 +32,13 @@ const gitRepoUrl = z.string().trim().max(512).refine(
 );
 
 // ─── Application config (used by POST /api/applications & example JSON) ──
+// Phase 1: runtime locked to 'java'. The enum still resolves via Runtime so
+// reintroducing additional runtimes is a one-line change.
 export const ApplicationConfig = z.object({
   name: identifier,
   serverName: identifier,
   groupName: identifier.optional(),
-  runtime: z.enum([Runtime.NODE, Runtime.JAVA]),
+  runtime: z.enum(Object.values(Runtime)).default(Runtime.JAVA),
 
   buildStrategy: z.enum(Object.values(BuildStrategy)).default(BuildStrategy.TARGET),
   artifactPattern: z.string().max(255).optional(),       // 'target/*.jar'
@@ -95,6 +97,10 @@ export const ArtifactDescriptor = z.object({
 );
 
 // ─── API: enqueue an action ──────────────────────────────────────────────
+// `options` is an open bag today, but two keys have first-class semantics:
+//   - applicationId       → required when target.type='server_group' so the
+//                           orchestrator knows which app to fan a deploy out for
+//   - commitSha           → pins a specific git revision for a controller build
 export const EnqueueActionBody = z.object({
   action: z.enum(JobActions),
   target: z.object({
@@ -144,7 +150,7 @@ export const WsExecute = WsBase.extend({
   app: z.object({
     id: z.number().int().positive(),
     name: identifier,
-    runtime: z.enum([Runtime.NODE, Runtime.JAVA]),
+    runtime: z.enum(Object.values(Runtime)),
     workdir: nonEmpty,
     installCmd: z.string().optional(),
     buildCmd: z.string().optional(),
@@ -243,7 +249,7 @@ const dbName = z.string().regex(/^[a-z0-9-]{1,64}$/, 'lowercase alphanumeric / h
 const appBaseFields = {
   name:             dbName,
   group_id:         z.number().int().positive().nullable().optional(),
-  runtime:          z.enum([Runtime.NODE, Runtime.JAVA]),
+  runtime:          z.enum(Object.values(Runtime)).default(Runtime.JAVA),
   build_strategy:   z.enum(Object.values(BuildStrategy)).optional(),
   artifact_pattern: z.string().max(255).optional(),
   remote_install_path: pathAbs.optional(),
@@ -279,6 +285,21 @@ export const GroupCreate = z.object({
 }).strict();
 
 export const GroupUpdate = GroupCreate.partial();
+
+// A ServerGroup is a named bundle of servers, used as a deploy fan-out
+// target. `serverIds` fully replaces the membership when present — omit it
+// on creation if you want to add members later via PATCH.
+export const ServerGroupCreate = z.object({
+  name: dbName,
+  description: z.string().max(255).optional(),
+  serverIds: z.array(z.number().int().positive()).optional(),
+}).strict();
+
+export const ServerGroupUpdate = z.object({
+  name: dbName.optional(),
+  description: z.string().max(255).nullable().optional(),
+  serverIds: z.array(z.number().int().positive()).optional(),
+}).strict();
 
 // `hostname` can be any OpenSSH-compatible target: a DNS name, a raw IP,
 // or — most usefully — a Host alias defined in the controller's

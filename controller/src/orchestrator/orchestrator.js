@@ -2,16 +2,36 @@
 // validates the target, enqueues in-process job(s), writes the corresponding
 // rows into the `jobs` table, and records an audit entry.
 //
-// For group actions it fans out to one job per application in the group.
+// Targets:
+//   - app          → single application (one job)
+//   - group        → every enabled app in an application-group (fan-out)
+//   - server_group → one application deployed to every server in a
+//                    server-group (build once, deploy N times)
+//
+// Side-effect worth calling out: every successful enqueue *also* updates
+// `applications.expected_state` so the alert detector knows whether a
+// subsequent regression is operator-induced (no alert) or a real outage.
 
-import { enqueueAction, enqueueGroupAction } from '@cp/queue';
+import { enqueueAction } from '@cp/queue';
 import {
   BuildStrategy,
+  ExpectedState,
   JobAction, JobActions, JobTargetType, ProcessState, RetryProfile,
 } from '@cp/shared/constants';
 import { NotFoundError, ValidationError } from '@cp/shared/errors';
-import { applications, groups, jobs as jobsRepo } from '../db/repositories.js';
+import {
+  applications, groups, serverGroups, jobs as jobsRepo,
+} from '../db/repositories.js';
 import { writeAudit } from '../audit/audit.js';
+
+// Which actions flip expected_state, and in which direction. Actions not in
+// this map leave expected_state untouched (e.g. build, healthcheck).
+const EXPECTED_STATE_FOR_ACTION = Object.freeze({
+  [JobAction.START]:   ExpectedState.RUNNING,
+  [JobAction.RESTART]: ExpectedState.RUNNING,
+  [JobAction.DEPLOY]:  ExpectedState.RUNNING,
+  [JobAction.STOP]:    ExpectedState.STOPPED,
+});
 
 export async function submitAction({ action, target, triggeredBy, options = {} }) {
   if (!JobActions.includes(action)) {
@@ -40,18 +60,23 @@ export async function submitAction({ action, target, triggeredBy, options = {} }
     return results;
   }
 
+  if (target.type === JobTargetType.SERVER_GROUP) {
+    return [await enqueueServerGroupDeploy({
+      action, serverGroupRef: target.id, triggeredBy, options,
+    })];
+  }
+
   throw new ValidationError(`unsupported target.type: ${target.type}`);
 }
 
 async function enqueueOne(action, app, triggeredBy, options) {
-  // Refuse obviously-invalid combinations up-front (saves a queue round-trip).
-  if (action === JobAction.RESTART && app.process_state === ProcessState.UNKNOWN) {
-    // Allowed, but logged — the agent will sort it out.
-  }
   if (action === JobAction.START && !app.start_cmd) {
     throw new ValidationError(`app ${app.name} has no start_cmd`);
   }
   if (!app.enabled) throw new ValidationError(`app ${app.name} is disabled`);
+  if (action === JobAction.RESTART && app.process_state === ProcessState.UNKNOWN) {
+    // Allowed, but logged — the agent will sort it out.
+  }
 
   // Special-case: deploy on an app that builds on controller is two-phase:
   //   1. BUILD job (runs locally on controller)
@@ -86,6 +111,8 @@ async function enqueueOne(action, app, triggeredBy, options) {
     throw err;
   });
 
+  await applyExpectedState(app.id, action);
+
   await writeAudit({
     actor: triggeredBy, action, targetType: 'app', targetId: String(app.id),
     jobId, result: 'info', message: `queued ${action} for ${app.name}`,
@@ -99,7 +126,9 @@ async function enqueueOne(action, app, triggeredBy, options) {
   };
 }
 
-async function enqueueControllerBuild(app, triggeredBy, options) {
+async function enqueueControllerBuild(
+  app, triggeredBy, options, { deployServerIds, serverGroupName } = {},
+) {
   const profile = RetryProfile[JobAction.BUILD];
   const enq = await enqueueAction({
     action: JobAction.BUILD,
@@ -109,8 +138,12 @@ async function enqueueControllerBuild(app, triggeredBy, options) {
     payload: {
       appName: app.name,
       serverId: app.server_id,
-      buildOnController: true,    // processor branches on this
+      buildOnController: true,
       commitSha: options?.commitSha,
+      // When provided the build worker will chain one DEPLOY per server id
+      // rather than a single deploy against app.server_id.
+      deployServerIds: deployServerIds ?? null,
+      serverGroupName: serverGroupName ?? null,
       options,
     },
   });
@@ -125,16 +158,27 @@ async function enqueueControllerBuild(app, triggeredBy, options) {
     serverId: app.server_id,
     maxAttempts: profile.attempts,
     triggeredBy,
-    payload: { buildOnController: true, options },
+    payload: {
+      buildOnController: true,
+      deployServerIds: deployServerIds ?? null,
+      serverGroupName: serverGroupName ?? null,
+      options,
+    },
   }).catch((err) => {
     if (err?.code === 'ER_DUP_ENTRY') return null;
     throw err;
   });
 
+  // Deploy transitions the app to expected=running regardless of fan-out width.
+  await applyExpectedState(app.id, JobAction.DEPLOY);
+
   await writeAudit({
     actor: triggeredBy, action: 'deploy.plan', targetType: 'app', targetId: String(app.id),
     jobId, result: 'info',
-    message: `build-then-deploy for ${app.name} (build_strategy=controller)`,
+    message: serverGroupName
+      ? `build-then-deploy for ${app.name} → server-group ${serverGroupName} (${deployServerIds?.length ?? 0} servers)`
+      : `build-then-deploy for ${app.name} (build_strategy=controller)`,
+    metadata: deployServerIds ? { serverGroupName, serverIds: deployServerIds } : undefined,
   });
 
   return {
@@ -144,7 +188,49 @@ async function enqueueControllerBuild(app, triggeredBy, options) {
     action: JobAction.DEPLOY,
     twoPhase: true,
     phase: 'build',
+    fanOut: deployServerIds
+      ? { serverGroupName, serverIds: deployServerIds }
+      : undefined,
   };
+}
+
+// server_group deploy: build once on the controller, then fan out one deploy
+// per member server. Only supported for controller-built apps — agent-side
+// builds already live on a single server and can't be multiplexed.
+async function enqueueServerGroupDeploy({ action, serverGroupRef, triggeredBy, options }) {
+  if (action !== JobAction.DEPLOY) {
+    throw new ValidationError(
+      `server_group target supports only action='deploy' (got '${action}')`,
+    );
+  }
+  const appRef = options?.applicationId ?? options?.applicationName;
+  if (!appRef) {
+    throw new ValidationError('server_group deploy requires options.applicationId');
+  }
+  const app = await resolveApp(appRef);
+  if (!app.enabled) throw new ValidationError(`app ${app.name} is disabled`);
+  if (app.build_strategy !== BuildStrategy.CONTROLLER) {
+    throw new ValidationError(
+      `server_group deploy requires build_strategy='controller' (app ${app.name} uses '${app.build_strategy}')`,
+    );
+  }
+
+  const sg = await resolveServerGroup(serverGroupRef);
+  const memberIds = await serverGroups.listMemberIds(sg.id);
+  if (memberIds.length === 0) {
+    throw new ValidationError(`server-group ${sg.name} has no members`);
+  }
+
+  return enqueueControllerBuild(app, triggeredBy, options, {
+    deployServerIds: memberIds,
+    serverGroupName: sg.name,
+  });
+}
+
+async function applyExpectedState(appId, action) {
+  const next = EXPECTED_STATE_FOR_ACTION[action];
+  if (!next) return;
+  await applications.setExpectedState(appId, next).catch(() => {});
 }
 
 async function resolveApp(idOrName) {
@@ -165,4 +251,12 @@ async function resolveGroup(idOrName) {
     : await groups.getByName(key);
   if (!group) throw new NotFoundError('group', idOrName);
   return group;
+}
+
+async function resolveServerGroup(idOrName) {
+  const key = String(idOrName);
+  if (/^\d+$/.test(key)) return serverGroups.get(Number(key));
+  const byName = await serverGroups.getByName(key);
+  if (!byName) throw new NotFoundError('server_group', idOrName);
+  return byName;
 }

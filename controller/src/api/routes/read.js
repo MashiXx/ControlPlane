@@ -2,7 +2,7 @@
 
 import { Router } from 'express';
 import {
-  applications, groups, servers, jobs as jobsRepo, audit,
+  applications, groups, servers, serverGroups, jobs as jobsRepo, audit,
 } from '../../db/repositories.js';
 
 export function readRouter() {
@@ -14,6 +14,24 @@ export function readRouter() {
 
   r.get('/groups', async (_req, res, next) => {
     try { res.json(await groups.list()); } catch (e) { next(e); }
+  });
+
+  // Server-groups (fan-out deploy targets) — list returns member_count; the
+  // detail endpoint attaches the full member rows so the UI can render the
+  // group's servers without a second round-trip.
+  r.get('/server-groups', async (_req, res, next) => {
+    try { res.json(await serverGroups.list()); } catch (e) { next(e); }
+  });
+
+  r.get('/server-groups/:id', async (req, res, next) => {
+    try {
+      const id = Number(req.params.id);
+      const [group, members] = await Promise.all([
+        serverGroups.get(id),
+        serverGroups.listMembers(id),
+      ]);
+      res.json({ ...group, members });
+    } catch (e) { next(e); }
   });
 
   r.get('/applications', async (_req, res, next) => {

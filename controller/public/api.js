@@ -32,6 +32,8 @@ export const apiClient = {
   listApps:    () => request('GET', '/applications'),
   listGroups:  () => request('GET', '/groups'),
   listServers: () => request('GET', '/servers'),
+  listServerGroups: () => request('GET', '/server-groups'),
+  getServerGroup:   (id) => request('GET', `/server-groups/${id}`),
   listJobs:    () => request('GET', '/jobs?limit=50'),
   listAudit:   () => request('GET', '/audit?limit=50'),
 
@@ -48,5 +50,12 @@ export const apiClient = {
   rotateServerToken: (id)        => request('POST',   `/servers/${id}/rotate-token`),
   deleteServer:      (id)        => request('DELETE', `/servers/${id}`),
 
-  enqueue: (action, target) => request('POST', '/actions', { action, target }),
+  createServerGroup: (body)      => request('POST',   '/server-groups', body),
+  updateServerGroup: (id, patch) => request('PATCH',  `/server-groups/${id}`, patch),
+  deleteServerGroup: (id)        => request('DELETE', `/server-groups/${id}`),
+
+  enqueue: (action, target, options) => request(
+    'POST', '/actions',
+    options ? { action, target, options } : { action, target },
+  ),
 };

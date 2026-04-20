@@ -57,7 +57,36 @@ tr:hover td { background: #161b22; }
               { background: #3a3011; color: #d4a72c; }
 .st-unknown  { background: #21262d; color: #8b949e; }
 
+/* Expected-state badges + drift highlighting. A row renders with .row-drift
+   when actual process_state has regressed against expected_state — the same
+   condition the alert manager pages on, so it stays visually consistent. */
+.st-expected-running { background: #0d3f1a; color: #7ee787; }
+.st-expected-stopped { background: #21262d; color: #8b949e; }
+tr.row-drift td { background: rgba(218,54,51,0.08); }
+tr.row-drift:first-child td { border-top: 1px solid #da3633; }
+.hint { color: #8b949e; font-size: 12px; margin: 4px 0 12px; }
+
 td button + button { margin-left: 4px; }
+
+/* ─── Top-of-page alert stack ──────────────────────────────────────────── */
+.alerts-banner {
+  position: sticky; top: 0; z-index: 50;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 6px 20px; background: #2a0e10;
+  border-bottom: 1px solid #da3633;
+}
+.alerts-banner[hidden] { display: none; }
+.alert-item {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13px; color: #ffc7c2;
+}
+.alert-dot  { color: #ff6a69; font-size: 16px; line-height: 1; }
+.alert-text { flex: 1; }
+.alert-dismiss {
+  background: transparent; border: 0; color: #ffc7c2;
+  font-size: 18px; line-height: 1; padding: 0 6px; cursor: pointer;
+}
+.alert-dismiss:hover { color: #fff; }
 
 pre#live-logs {
   background: #010409; color: #c9d1d9; padding: 12px; border-radius: 6px;

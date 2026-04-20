@@ -21,9 +21,10 @@ export const JobStatus = Object.freeze({
 });
 
 export const JobTargetType = Object.freeze({
-  APP:    'app',
-  GROUP:  'group',
-  SERVER: 'server',
+  APP:          'app',
+  GROUP:        'group',
+  SERVER:       'server',
+  SERVER_GROUP: 'server_group',
 });
 
 export const ProcessState = Object.freeze({
@@ -34,6 +35,13 @@ export const ProcessState = Object.freeze({
   UNKNOWN:  'unknown',
 });
 
+// Operator-expected lifecycle state. Used by the alert detector to decide
+// whether an agent-reported state transition is a regression worth paging on.
+export const ExpectedState = Object.freeze({
+  RUNNING: 'running',
+  STOPPED: 'stopped',
+});
+
 export const ServerStatus = Object.freeze({
   ONLINE:      'online',
   OFFLINE:     'offline',
@@ -41,8 +49,10 @@ export const ServerStatus = Object.freeze({
   DRAINING:    'draining',
 });
 
+// ControlPlane phase 1 is Java-only. Node.js / PM2 support is deferred to a
+// later phase — the enum deliberately has a single value so the rest of the
+// stack (validators, UI, migrations) can't silently accept other runtimes.
 export const Runtime = Object.freeze({
-  NODE: 'node',
   JAVA: 'java',
 });
 
@@ -52,10 +62,11 @@ export const BuildStrategy = Object.freeze({
   BUILDER:    'builder',     // future: dedicated builder pool
 });
 
+// PM2 is intentionally absent in phase 1 (Java deployments don't use pm2).
+// It will come back alongside Node.js support in a later phase.
 export const LaunchMode = Object.freeze({
   WRAPPED: 'wrapped',
   RAW:     'raw',
-  PM2:     'pm2',
   SYSTEMD: 'systemd',
 });
 

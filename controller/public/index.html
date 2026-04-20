@@ -16,10 +16,16 @@
     <button data-tab="apps"    class="active">Applications</button>
     <button data-tab="groups">Groups</button>
     <button data-tab="servers">Servers</button>
+    <button data-tab="server-groups">Server groups</button>
     <button data-tab="jobs">Jobs</button>
     <button data-tab="audit">Audit</button>
     <button data-tab="logs">Live logs</button>
   </nav>
+
+  <!-- Ephemeral alerts pushed over the /ui WS. Populated by app.js; each
+       banner self-dismisses after a short timeout. Kept outside <main> so
+       banners stay visible regardless of the active tab. -->
+  <div id="alerts-banner" class="alerts-banner" hidden></div>
 
   <main>
     <section id="tab-apps" class="tab active">
@@ -33,7 +39,7 @@
       <table id="apps-table">
         <thead><tr>
           <th>Name</th><th>Group</th><th>Server</th><th>Runtime</th>
-          <th>State</th><th>PID</th><th>Uptime</th><th>Actions</th>
+          <th>State</th><th>Expected</th><th>PID</th><th>Uptime</th><th>Actions</th>
         </tr></thead>
         <tbody></tbody>
       </table>
@@ -77,6 +83,21 @@
       <table id="servers-table">
         <thead><tr>
           <th>Name</th><th>Hostname</th><th>Status</th><th>Transfer</th><th>Last seen</th><th>Actions</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section id="tab-server-groups" class="tab">
+      <div class="toolbar">
+        <button id="btn-new-server-group">+ New server group</button>
+      </div>
+      <p class="hint">Server groups bundle target servers for deploy fan-out.
+        Pick an app, pick a group, and the controller builds once and
+        deploys to every member (via rsync or signed HTTP per-server).</p>
+      <table id="server-groups-table">
+        <thead><tr>
+          <th>Name</th><th>Description</th><th>Members</th><th>Actions</th>
         </tr></thead>
         <tbody></tbody>
       </table>
