@@ -183,7 +183,6 @@ async function runControllerDeploy({ job, app, triggeredBy, payload, hub, dispat
     server, app, artifact, releaseId,
     secret:        config.artifactSecret,
     publicBaseUrl: config.publicBaseUrl,
-    sshKeyDir:     config.sshKeyDir,
   });
 
   const jobDbRow = await jobsRepo.getByQueueJobId(job.id);

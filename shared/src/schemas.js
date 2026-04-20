@@ -270,33 +270,21 @@ export const GroupCreate = z.object({
 
 export const GroupUpdate = GroupCreate.partial();
 
-const sshConfigSchema = z.object({
-  user: z.string().min(1),
-  host: z.string().min(1),
-  port: z.number().int().min(1).max(65535).optional(),
-  key_path: pathAbs.optional(),
-});
-
+// `hostname` can be any OpenSSH-compatible target: a DNS name, a raw IP,
+// or — most usefully — a Host alias defined in the controller's
+// ~/.ssh/config. For rsync transport the controller passes it straight
+// to `ssh` / `rsync`, so all connection details (User, Port, IdentityFile,
+// ProxyJump) live in the ssh config file, not in the DB.
 export const ServerCreate = z.object({
   name: dbName,
   hostname: z.string().min(1).max(255),
   artifact_transfer: z.enum(Object.values(ArtifactTransfer)),
   labels: z.record(z.string(), z.string()).optional(),
-  ssh_config: sshConfigSchema.optional(),
-}).strict().superRefine((cfg, ctx) => {
-  if (cfg.artifact_transfer === ArtifactTransfer.RSYNC && !cfg.ssh_config) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['ssh_config'],
-      message: "artifact_transfer='rsync' requires ssh_config",
-    });
-  }
-});
+}).strict();
 
 export const ServerUpdate = z.object({
   name: dbName.optional(),
   hostname: z.string().min(1).max(255).optional(),
   artifact_transfer: z.enum(Object.values(ArtifactTransfer)).optional(),
   labels: z.record(z.string(), z.string()).nullable().optional(),
-  ssh_config: sshConfigSchema.nullable().optional(),
 }).strict();

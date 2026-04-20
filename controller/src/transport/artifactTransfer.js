@@ -16,7 +16,7 @@ const logger = createLogger({ service: 'transport.artifact' });
  * @returns {Promise<object>} ArtifactDescriptor
  */
 export async function prepareArtifactForTarget({
-  server, app, artifact, releaseId, secret, publicBaseUrl, sshKeyDir,
+  server, app, artifact, releaseId, secret, publicBaseUrl,
 }) {
   const base = {
     id: Number(artifact.id),
@@ -28,8 +28,7 @@ export async function prepareArtifactForTarget({
   if (server.artifact_transfer === ArtifactTransfer.RSYNC) {
     logger.info({ serverId: server.id, artifactId: artifact.id }, 'transport:rsync');
     const { prestagedPath } = await pushArtifact({
-      server, artifact, remoteInstallPath: app.remote_install_path,
-      releaseId, sshKeyDir,
+      server, artifact, remoteInstallPath: app.remote_install_path, releaseId,
     });
     return { ...base, prestagedPath };
   }

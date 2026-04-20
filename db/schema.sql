@@ -2,10 +2,9 @@
 -- Charset: utf8mb4 throughout. Engine: InnoDB for transactional integrity.
 
 SET NAMES utf8mb4;
-SET time_zone = '+00:00';
 
 CREATE DATABASE IF NOT EXISTS controlplane
-  CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
+  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE controlplane;
 
 -- ─────────────────────────────────────────────────────────────────────────
@@ -27,6 +26,10 @@ CREATE TABLE IF NOT EXISTS `groups` (
 CREATE TABLE IF NOT EXISTS servers (
   id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   name            VARCHAR(64)   NOT NULL,
+  -- Hostname OR an SSH Host alias defined in the controller's ~/.ssh/config.
+  -- When artifact_transfer='rsync' this is passed as-is to `ssh <hostname>`
+  -- and `rsync ... <hostname>:...`, so OpenSSH resolves User / Port /
+  -- IdentityFile / ProxyJump / HostName from ~/.ssh/config.
   hostname        VARCHAR(255)  NOT NULL,
   -- SHA-256 hash of the bearer token the agent presents on connect.
   -- Raw token is shown to the operator exactly once at provisioning time.
@@ -41,9 +44,8 @@ CREATE TABLE IF NOT EXISTS servers (
   labels          JSON          NULL,
   -- how artifacts reach this server:
   --   http  → agent pulls via HTTP from controller (default; for WS agents)
-  --   rsync → controller pushes via rsync+ssh (requires ssh_config)
+  --   rsync → controller pushes via rsync+ssh using `hostname` as target
   artifact_transfer ENUM('http','rsync') NOT NULL DEFAULT 'http',
-  ssh_config      JSON          NULL,   -- {user, host, port, key_path, ...}
   created_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),

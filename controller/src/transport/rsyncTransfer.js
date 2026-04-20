@@ -1,14 +1,19 @@
 // Rsync push transfer: controller streams the artifact into the target
-// server's release directory over SSH, bypassing HTTP pull.
+// server's release directory over SSH.
+//
+// The `hostname` column is passed as-is to `ssh` and `rsync`, so
+// everything else — User, Port, IdentityFile, ProxyJump, StrictHostKeyChecking,
+// UserKnownHostsFile — is read from the controller's ~/.ssh/config.
 //
 // Flow:
 //   1. Extract controller-local tar.gz to a staging dir (content-addressed).
-//   2. Rsync staging/ → target:<remote_install_path>/releases/<release_id>/
-//   3. Return the prestaged remote path so the deploy handler skips download.
+//   2. `ssh <hostname> mkdir -p …`   (dest dir, portable — avoids requiring rsync ≥3.2.3)
+//   3. `rsync -az --delete staging/ <hostname>:<remote_install_path>/releases/<release_id>/`
+//   4. Return the prestaged remote path so the deploy handler skips download.
 //
-// Security: the SSH key lives on disk in CONTROLLER_SSH_KEY_DIR; host keys
-// are pinned via `-o UserKnownHostsFile=... -o StrictHostKeyChecking=yes`
-// provided by the operator in ssh_config on the server row.
+// Hardening we enforce regardless of ~/.ssh/config:
+//   -o BatchMode=yes       — never prompt; this is a background job
+//   -o ConnectTimeout=10   — fail fast when the target is unreachable
 
 import path from 'node:path';
 import fs from 'node:fs/promises';
@@ -24,19 +29,20 @@ import { createLogger } from '@cp/shared/logger';
 
 const logger = createLogger({ service: 'transport.rsync' });
 
+const SSH_OPTS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10'];
+
 /**
  * @param {object} p
- * @param {object} p.server        - row from servers (must have ssh_config)
- * @param {object} p.artifact      - row from artifacts (path, sha256)
+ * @param {object} p.server            - row from servers (needs .hostname, .name, .id)
+ * @param {object} p.artifact          - row from artifacts (path, sha256, id)
  * @param {string} p.remoteInstallPath
  * @param {string} p.releaseId
- * @param {string} p.sshKeyDir     - controller dir holding ssh keys
  * @returns {Promise<{ prestagedPath: string }>}
  */
-export async function pushArtifact({ server, artifact, remoteInstallPath, releaseId, sshKeyDir }) {
-  const ssh = parseSshConfig(server);
+export async function pushArtifact({ server, artifact, remoteInstallPath, releaseId }) {
+  const target = server.hostname;
+  if (!target) throw new PermanentError(`server ${server.name} has no hostname`);
 
-  // 1. extract to staging (ephemeral)
   const staging = await fs.mkdtemp(path.join(os.tmpdir(), `cp-stage-${artifact.id}-`));
   try {
     await pipeline(
@@ -45,22 +51,16 @@ export async function pushArtifact({ server, artifact, remoteInstallPath, releas
       tar.extract(staging),
     );
 
-    // 2. rsync — trailing slash on src copies contents into dest.
     const remoteDir = path.posix.join(remoteInstallPath, 'releases', releaseId) + '/';
-    const sshOpt = buildSshOpt(ssh, sshKeyDir);
 
-    // Ensure dest dir exists (rsync --mkpath exists in rsync ≥3.2.3; use
-    // a prep ssh call for portability).
-    await runSimple('ssh', [...sshOpt, sshTarget(ssh), `mkdir -p ${shellSafe(remoteDir)}`]);
+    await runSimple('ssh', [...SSH_OPTS, target, `mkdir -p ${shellSafe(remoteDir)}`]);
 
-    const rsyncArgs = [
-      '-az',
-      '--delete',
-      '-e', `ssh ${sshOpt.join(' ')}`,
+    await runSimple('rsync', [
+      '-az', '--delete',
+      '-e', `ssh ${SSH_OPTS.join(' ')}`,
       `${staging}/`,
-      `${sshTarget(ssh)}:${remoteDir}`,
-    ];
-    await runSimple('rsync', rsyncArgs, { timeoutMs: 20 * 60 * 1000 });
+      `${target}:${remoteDir}`,
+    ], { timeoutMs: 20 * 60 * 1000 });
 
     logger.info({ serverId: server.id, releaseId, remoteDir }, 'rsync:pushed');
     return { prestagedPath: remoteDir };
@@ -69,41 +69,7 @@ export async function pushArtifact({ server, artifact, remoteInstallPath, releas
   }
 }
 
-function parseSshConfig(server) {
-  const raw = server.ssh_config;
-  const cfg = typeof raw === 'string' ? JSON.parse(raw) : (raw ?? {});
-  if (!cfg.host) throw new PermanentError(`server ${server.name} has no ssh_config.host`);
-  return {
-    host:        cfg.host,
-    user:        cfg.user ?? 'controlplane',
-    port:        Number(cfg.port ?? 22),
-    keyFile:     cfg.key_file ?? 'id_ed25519',
-    knownHosts:  cfg.known_hosts_file,   // optional absolute path
-  };
-}
-
-function buildSshOpt(ssh, sshKeyDir) {
-  const keyPath = path.isAbsolute(ssh.keyFile)
-    ? ssh.keyFile
-    : path.join(sshKeyDir, ssh.keyFile);
-  const args = [
-    '-p', String(ssh.port),
-    '-i', keyPath,
-    '-o', 'StrictHostKeyChecking=yes',
-    '-o', 'BatchMode=yes',
-    '-o', 'ServerAliveInterval=30',
-    '-o', 'ServerAliveCountMax=3',
-  ];
-  if (ssh.knownHosts) {
-    args.push('-o', `UserKnownHostsFile=${ssh.knownHosts}`);
-  }
-  return args;
-}
-
-function sshTarget(ssh) { return `${ssh.user}@${ssh.host}`; }
-
 function shellSafe(s) {
-  // Conservative: only allow filesystem-safe characters.
   if (!/^[\w@%+=:,./-]+$/.test(s)) throw new PermanentError(`unsafe remote path: ${s}`);
   return s;
 }

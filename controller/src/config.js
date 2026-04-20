@@ -35,8 +35,6 @@ export function loadControllerConfig() {
     artifactSecret:   process.env.ARTIFACT_SIGNING_SECRET ?? process.env.CONTROLLER_JWT_SECRET ?? 'change-me',
     // How agents reach the controller for artifact download (host:port external)
     publicBaseUrl:    process.env.CONTROLLER_PUBLIC_URL ?? 'http://127.0.0.1:8080',
-    // SSH key dir for rsync push
-    sshKeyDir:        process.env.CONTROLLER_SSH_KEY_DIR ?? `${process.env.HOME ?? '/root'}/.ssh`,
   };
 }
 

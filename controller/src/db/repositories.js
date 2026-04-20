@@ -27,7 +27,7 @@ function buildUpdate(table, id, patch, allowed) {
 
 // ─── servers ────────────────────────────────────────────────────────────
 const SERVER_EDITABLE_FIELDS = new Set([
-  'name', 'hostname', 'labels', 'artifact_transfer', 'ssh_config',
+  'name', 'hostname', 'labels', 'artifact_transfer',
 ]);
 
 export const servers = {
@@ -53,16 +53,15 @@ export const servers = {
   async create({ row, tokenHash }, c) {
     const [res] = await conn(c).execute(
       `INSERT INTO servers
-         (name, hostname, auth_token_hash, artifact_transfer, labels, ssh_config)
+         (name, hostname, auth_token_hash, artifact_transfer, labels)
        VALUES
-         (:name, :hostname, :tokenHash, :artifactTransfer, :labels, :sshConfig)`,
+         (:name, :hostname, :tokenHash, :artifactTransfer, :labels)`,
       {
         name: row.name,
         hostname: row.hostname,
         tokenHash,
         artifactTransfer: row.artifact_transfer,
-        labels:    row.labels     ? JSON.stringify(row.labels)     : null,
-        sshConfig: row.ssh_config ? JSON.stringify(row.ssh_config) : null,
+        labels: row.labels ? JSON.stringify(row.labels) : null,
       },
     );
     return this.get(res.insertId, c);

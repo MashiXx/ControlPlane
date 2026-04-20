@@ -29,28 +29,23 @@ export function openServerForm({ initial, onSaved }) {
   const isEdit = Boolean(initial);
   const form = document.createElement('form');
   const labels = initial?.labels ? JSON.stringify(initial.labels, null, 2) : '';
-  const ssh    = initial?.ssh_config ? JSON.stringify(initial.ssh_config, null, 2) : '';
 
   form.innerHTML = `
     <label>Name
       <input name="name" required pattern="[a-z0-9-]{1,64}"
              value="${escape(initial?.name)}" ${isEdit ? 'disabled' : 'autofocus'}>
     </label>
-    <label>Hostname
+    <label>Hostname — DNS name, IP, or Host alias from controller's ~/.ssh/config
       <input name="hostname" required maxlength="255" value="${escape(initial?.hostname)}">
     </label>
     <label>Artifact transfer
       <select name="artifact_transfer" required>
         <option value="http"  ${initial?.artifact_transfer === 'http'  ? 'selected' : ''}>http (agent pulls)</option>
-        <option value="rsync" ${initial?.artifact_transfer === 'rsync' ? 'selected' : ''}>rsync (controller pushes)</option>
+        <option value="rsync" ${initial?.artifact_transfer === 'rsync' ? 'selected' : ''}>rsync (controller pushes via ssh &lt;hostname&gt;)</option>
       </select>
     </label>
     <label>Labels — JSON object, optional
       <textarea name="labels" rows="3" placeholder='{"region":"eu","env":"prod"}'>${escape(labels)}</textarea>
-    </label>
-    <label>SSH config — required when transfer=rsync
-      <textarea name="ssh_config" rows="5"
-                placeholder='{"user":"deploy","host":"1.2.3.4","port":22,"key_path":"/home/ci/.ssh/id_rsa"}'>${escape(ssh)}</textarea>
     </label>
   `;
 
@@ -69,8 +64,7 @@ export function openServerForm({ initial, onSaved }) {
       payload = {
         hostname: String(fd.get('hostname') || '').trim(),
         artifact_transfer: String(fd.get('artifact_transfer') || ''),
-        labels:     parseJSONField('labels'),
-        ssh_config: parseJSONField('ssh_config'),
+        labels: parseJSONField('labels'),
       };
       if (!isEdit) payload.name = String(fd.get('name') || '').trim();
     } catch (err) { alert(err.message); return; }
