@@ -7,6 +7,7 @@ const escape = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
 export function openGroupForm({ initial, onSaved }) {
   const isEdit = Boolean(initial);
   const form = document.createElement('form');
+  form.noValidate = false;
   form.innerHTML = `
     <label>Name
       <input name="name" required pattern="[a-z0-9-]{1,64}"
@@ -17,24 +18,33 @@ export function openGroupForm({ initial, onSaved }) {
     </label>
   `;
 
-  openModal({
+  const submit = async (close) => {
+    if (!form.reportValidity()) return;
+    const fd = new FormData(form);
+    const name = String(fd.get('name') || '').trim();
+    const description = String(fd.get('description') || '').trim();
+    const payload = { name, ...(description ? { description } : {}) };
+    try {
+      const row = isEdit
+        ? await apiClient.updateGroup(initial.id, payload)
+        : await apiClient.createGroup(payload);
+      close();
+      onSaved?.(row);
+    } catch (err) { alert(`Save failed: ${err.message}`); }
+  };
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submit(() => handle.close());
+  });
+
+  const handle = openModal({
     title: isEdit ? `Edit group ${initial.name}` : 'New group',
     body: form,
     actions: [
       { label: 'Cancel', onClick: (h) => h.close() },
-      { label: isEdit ? 'Save' : 'Create', primary: true, onClick: async (h) => {
-        const fd = new FormData(form);
-        const name = String(fd.get('name') || '').trim();
-        const description = String(fd.get('description') || '').trim();
-        const payload = { name, ...(description ? { description } : {}) };
-        try {
-          const row = isEdit
-            ? await apiClient.updateGroup(initial.id, payload)
-            : await apiClient.createGroup(payload);
-          h.close();
-          onSaved?.(row);
-        } catch (err) { alert(`Save failed: ${err.message}`); }
-      }},
+      { label: isEdit ? 'Save' : 'Create', primary: true,
+        onClick: (h) => submit(() => h.close()) },
     ],
   });
 }

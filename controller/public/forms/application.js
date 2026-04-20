@@ -27,7 +27,13 @@ const COMMAND_FIELDS = [
 export function openApplicationForm({ initial, servers, groups, onSaved }) {
   const isEdit  = Boolean(initial);
   const running = isEdit && initial.process_state !== 'stopped';
-  const form    = document.createElement('form');
+
+  if (!isEdit && servers.length === 0) {
+    alert('Create a server first — the app needs somewhere to run.');
+    return;
+  }
+
+  const form = document.createElement('form');
 
   const serverOpts = servers.map((s) =>
     `<option value="${s.id}" ${initial?.server_id === s.id ? 'selected' : ''}>${escape(s.name)}</option>`,
@@ -48,12 +54,14 @@ export function openApplicationForm({ initial, servers, groups, onSaved }) {
     ${bannerHtml}
     <fieldset><legend>Basics</legend>
       <label>Name
-        <input name="name" required pattern="[a-z0-9-]{1,64}" value="${escape(initial?.name)}">
+        <input name="name" required pattern="[a-z0-9-]{1,64}" value="${escape(initial?.name)}" ${isEdit ? '' : 'autofocus'}>
       </label>
       <label>Server
         <select name="server_id" required ${isEdit ? 'disabled' : ''}>${serverOpts}</select>
       </label>
-      <label>Group <select name="group_id">${groupOpts}</select></label>
+      <label>Group
+        <select name="group_id">${groupOpts}</select>
+      </label>
       <label>Runtime
         <select name="runtime" required>
           <option value="node" ${initial?.runtime === 'node' ? 'selected' : ''}>node</option>
@@ -63,8 +71,12 @@ export function openApplicationForm({ initial, servers, groups, onSaved }) {
     </fieldset>
 
     <fieldset><legend>Git</legend>
-      <label>Repo URL <input name="repo_url" type="url" maxlength="512" value="${escape(initial?.repo_url)}"></label>
-      <label>Branch  <input name="branch" maxlength="128" value="${escape(initial?.branch ?? 'main')}"></label>
+      <label>Repo URL
+        <input name="repo_url" type="url" maxlength="512" value="${escape(initial?.repo_url)}">
+      </label>
+      <label>Branch
+        <input name="branch" maxlength="128" value="${escape(initial?.branch ?? 'main')}">
+      </label>
     </fieldset>
 
     <fieldset><legend>Build</legend>
@@ -74,10 +86,18 @@ export function openApplicationForm({ initial, servers, groups, onSaved }) {
             `<option value="${v}" ${initial?.build_strategy === v ? 'selected' : ''}>${v}</option>`).join('')}
         </select>
       </label>
-      <label>Install cmd         <input name="install_cmd"         maxlength="512" value="${escape(initial?.install_cmd)}"></label>
-      <label>Build cmd           <input name="build_cmd"           maxlength="512" value="${escape(initial?.build_cmd)}"></label>
-      <label>Artifact pattern    <input name="artifact_pattern"    maxlength="255" value="${escape(initial?.artifact_pattern)}"></label>
-      <label>Remote install path <input name="remote_install_path" maxlength="512" value="${escape(initial?.remote_install_path)}"></label>
+      <label>Install cmd
+        <input name="install_cmd" maxlength="512" value="${escape(initial?.install_cmd)}">
+      </label>
+      <label>Build cmd
+        <input name="build_cmd" maxlength="512" value="${escape(initial?.build_cmd)}">
+      </label>
+      <label>Artifact pattern
+        <input name="artifact_pattern" maxlength="255" value="${escape(initial?.artifact_pattern)}">
+      </label>
+      <label>Remote install path
+        <input name="remote_install_path" maxlength="512" value="${escape(initial?.remote_install_path)}">
+      </label>
     </fieldset>
 
     <fieldset><legend>Run</legend>
@@ -87,22 +107,36 @@ export function openApplicationForm({ initial, servers, groups, onSaved }) {
             `<option value="${v}" ${initial?.launch_mode === v ? 'selected' : ''}>${v}</option>`).join('')}
         </select>
       </label>
-      <label>Workdir    <input name="workdir" required maxlength="512" value="${escape(initial?.workdir)}"></label>
-      <label>Start cmd  <input name="start_cmd" required maxlength="512" value="${escape(initial?.start_cmd)}"></label>
-      <label>Stop cmd   <input name="stop_cmd"   maxlength="512" value="${escape(initial?.stop_cmd)}"></label>
-      <label>Status cmd <input name="status_cmd" maxlength="512" value="${escape(initial?.status_cmd)}"></label>
-      <label>Logs cmd   <input name="logs_cmd"   maxlength="512" value="${escape(initial?.logs_cmd)}"></label>
-      <label>Health cmd <input name="health_cmd" maxlength="512" value="${escape(initial?.health_cmd)}"></label>
-      <label>Env (JSON object)
-        <textarea name="env" rows="4">${escape(envRaw)}</textarea>
+      <label>Workdir (absolute path)
+        <input name="workdir" required maxlength="512" pattern="/[\\w\\-./]+" value="${escape(initial?.workdir)}">
+      </label>
+      <label>Start cmd
+        <input name="start_cmd" required maxlength="512" value="${escape(initial?.start_cmd)}">
+      </label>
+      <label>Stop cmd
+        <input name="stop_cmd" maxlength="512" value="${escape(initial?.stop_cmd)}">
+      </label>
+      <label>Status cmd
+        <input name="status_cmd" maxlength="512" value="${escape(initial?.status_cmd)}">
+      </label>
+      <label>Logs cmd
+        <input name="logs_cmd" maxlength="512" value="${escape(initial?.logs_cmd)}">
+      </label>
+      <label>Health cmd
+        <input name="health_cmd" maxlength="512" value="${escape(initial?.health_cmd)}">
+      </label>
+      <label>Env — JSON object
+        <textarea name="env" rows="4" placeholder='{"PORT":"8080","DATABASE_URL":"..."}'>${escape(envRaw)}</textarea>
       </label>
     </fieldset>
 
     <fieldset><legend>Advanced</legend>
-      <label><input type="checkbox" name="trusted" ${initial?.trusted ? 'checked' : ''}>
+      <label class="inline">
+        <input type="checkbox" name="trusted" ${initial?.trusted ? 'checked' : ''}>
         Trusted (allow free-form commands — RCE risk)
       </label>
-      <label><input type="checkbox" name="enabled" ${initial?.enabled !== 0 ? 'checked' : ''}>
+      <label class="inline">
+        <input type="checkbox" name="enabled" ${initial?.enabled !== 0 ? 'checked' : ''}>
         Enabled
       </label>
     </fieldset>
@@ -135,23 +169,32 @@ export function openApplicationForm({ initial, servers, groups, onSaved }) {
   });
   swapCommandFields(form, trustedEl.checked);
 
-  openModal({
+  const submit = async (close) => {
+    if (!form.reportValidity()) return;
+    let payload;
+    try { payload = collect(form, isEdit); }
+    catch (err) { alert(err.message); return; }
+    try {
+      const row = isEdit
+        ? await apiClient.updateApp(initial.id, payload)
+        : await apiClient.createApp(payload);
+      close();
+      onSaved?.(row);
+    } catch (err) { alert(`Save failed: ${err.message}`); }
+  };
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submit(() => handle.close());
+  });
+
+  const handle = openModal({
     title: isEdit ? `Edit app ${initial.name}` : 'New application',
     body: form,
     actions: [
       { label: 'Cancel', onClick: (h) => h.close() },
-      { label: isEdit ? 'Save' : 'Create', primary: true, onClick: async (h) => {
-        let payload;
-        try { payload = collect(form, isEdit); }
-        catch (err) { alert(err.message); return; }
-        try {
-          const row = isEdit
-            ? await apiClient.updateApp(initial.id, payload)
-            : await apiClient.createApp(payload);
-          h.close();
-          onSaved?.(row);
-        } catch (err) { alert(`Save failed: ${err.message}`); }
-      }},
+      { label: isEdit ? 'Save' : 'Create', primary: true,
+        onClick: (h) => submit(() => h.close()) },
     ],
   });
 }
@@ -166,7 +209,9 @@ function swapCommandFields(form, trusted) {
     const replace = document.createElement(trusted ? 'textarea' : 'input');
     replace.name = f;
     replace.value = val;
-    if (!trusted) {
+    if (trusted) {
+      replace.rows = 2;
+    } else {
       replace.setAttribute('type', 'text');
       replace.setAttribute('maxlength', '512');
     }
@@ -217,7 +262,7 @@ function collect(form, isEdit) {
 export function confirmDeleteApp(app) {
   return confirmModal({
     title: `Delete app "${app.name}"?`,
-    message: 'DELETE the application row and cascade-delete its artifacts and deployments (build history will be lost). The app must be enabled=false and stopped before deletion.',
+    message: 'DELETE the application row and cascade-delete its artifacts and deployments (build history will be lost). The app must have Enabled=off and process_state=stopped before deletion.',
     confirmLabel: 'Delete permanently',
     danger: true,
   });
