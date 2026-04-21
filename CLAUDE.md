@@ -39,6 +39,7 @@ These cut across multiple files and are easy to violate:
 - **Retry only on `TransientError`.** `shared/src/errors.js` defines `TransientError` vs `PermanentError`. The worker checks `err.transient`. Validation, auth, "command not whitelisted", "app disabled" are permanent → fail fast. `ssh exit 255`, `ssh timeout`, `rsync` non-zero, healthcheck non-zero → transient.
 - **Constants ↔ schema must stay aligned.** All enum values in `shared/src/constants.js` (`JobAction`, `JobStatus`, `LaunchMode`, `ProcessState`, `ServerStatus`, `Runtime`, `ExpectedState`) mirror MySQL `ENUM` columns in `db/schema.sql`. Adding a value requires editing both — and a migration.
 - **Phase 1 is Java-only.** `Runtime = {JAVA}` and `LaunchMode` excludes `pm2`. Node.js/PM2 support returns in phase 2 — do NOT reintroduce `node` as a runtime or `pm2` as a launch mode without a paired migration and UI work.
+- **Apps are multi-tenant across servers.** `applications.server_id` no longer exists; each app registers N replicas in `application_servers` (one row per (app, server) pair, carrying per-replica `process_state` / `expected_state` / `pid` / `last_alert_at` / `current_release_id`). Every action (deploy/start/stop/restart/healthcheck) must carry an explicit server selector — `options.serverId`, `options.serverIds`, or `options.serverGroupId`. `target.type='server_group'` is gone.
 - **Every deploy builds on the controller.** `applications.build_strategy` is pinned to `'controller'` (the enum has only that value). There is no agent-side build path.
 - **Four named queues, not one.** `cp:restart`, `cp:build`, `cp:deploy`, `cp:system` (`QueueName` in constants). Each gets its own worker so a slow build can't starve restarts. `QueueForAction` maps actions to queues — extend both when adding an action.
 
@@ -48,7 +49,7 @@ The controller drives every target-server action over SSH. Entry points:
 
 - [controller/src/ssh/sshClient.js](controller/src/ssh/sshClient.js) — the single `runSsh(host, cmd, opts)` / `runRsync(local, host, remote, opts)` wrapper. Hardcodes `-o BatchMode=yes -o ConnectTimeout=10`. Exports `shellSafe` and `shellQuote` helpers.
 - [controller/src/exec/remoteExec.js](controller/src/exec/remoteExec.js) — per-action logic: `startAction`, `stopAction`, `restartAction`, `healthcheckAction`, `deployAction`. Composes the wrapped / raw / systemd launch command on the fly and embeds it in the SSH call. Runs the whitelist (`SUSPICIOUS` regex) on untrusted apps.
-- [controller/src/pollers/stateScheduler.js](controller/src/pollers/stateScheduler.js) — `setInterval` every `STATE_POLL_INTERVAL_MS` (30s default). Pings every non-draining server; on success polls each enabled app with a launch-mode-specific status probe and updates `applications.process_state`. Three consecutive misses flips the server to `unreachable` and marks every app on it as `unknown`.
+- [controller/src/pollers/stateScheduler.js](controller/src/pollers/stateScheduler.js) — `setInterval` every `STATE_POLL_INTERVAL_MS` (30s default). Pings every non-draining server; on success walks every replica (row in `application_servers`) on that server, runs a launch-mode-specific status probe, and updates `application_servers.process_state`. Three consecutive server misses flip the server to `unreachable` and mark every replica on it as `unknown`.
 
 All connection details (User, Port, IdentityFile, ProxyJump, `ControlMaster`) live in the controller user's `~/.ssh/config`. Nothing per-server beyond the hostname alias lives in the DB.
 
@@ -63,27 +64,28 @@ Artifacts are deduped by `(application_id, sha256)` AND by `(application_id, com
 
 ## Server groups & fan-out deploy
 
-Separate from `groups` (which bundles *applications*): `server_groups` + `server_group_members` bundle **servers** for deploy fan-out. The flow is:
+Separate from `groups` (which bundles *applications*): `server_groups` + `server_group_members` bundle **servers** as a reusable fan-out selector. An app can be registered on any subset of servers via `application_servers`; when submitting an action with `options.serverGroupId`, the orchestrator intersects the server-group's members with the app's replica set. The flow is:
 
 1. Operator creates a server-group (e.g. `eu-payments`) and picks member servers via the dashboard's "Server groups" tab.
-2. Operator (or bot/API) submits `POST /api/actions` with `{ action: 'deploy', target: { type: 'server_group', id: 'eu-payments' }, options: { applicationId: 42 } }`.
-3. Orchestrator enqueues **one** BUILD carrying `payload.deployServerIds = [<member ids>]` and `serverGroupName`.
-4. On build success the build worker enqueues **N** deploy jobs — one per member — each with `payload.serverIdOverride` so `deployAction` hits the right host.
+2. Operator registers the app on each server it should run on, via `POST /api/applications/:id/servers` (or the dashboard "Replicas" dialog).
+3. Operator (or bot/API) submits `POST /api/actions` with `{ action: 'deploy', target: { type: 'app', id: 42 }, options: { serverGroupId: 'eu-payments' } }`.
+4. Orchestrator resolves `targetServerIds = server_group_members ∩ application_servers`. Enqueues **one** BUILD carrying `payload.deployServerIds = [<intersected ids>]`.
+5. On build success the build worker enqueues **N** deploy jobs — one per target server — each with `payload.serverIdOverride` so `deployAction` hits the right host.
 
 ## Expected state & alert-on-down
 
-Every lifecycle action flips `applications.expected_state`:
+Every lifecycle action flips `application_servers.expected_state` **per replica**:
 
 - `start`, `restart`, `deploy` → `running`
 - `stop` → `stopped`
 
-The alert detector [controller/src/alerts/alertManager.js](controller/src/alerts/alertManager.js) is called by the state scheduler after every per-app probe. When `expected_state='running'` and the poll reports `crashed`, `stopped`, or `unknown`, it:
+The alert detector [controller/src/alerts/alertManager.js](controller/src/alerts/alertManager.js) is called by the state scheduler after every per-replica probe. When `expected_state='running'` and the poll reports `crashed`, `stopped`, or `unknown`, it:
 
-1. Writes an `alert.app-down` row to `audit_logs`.
-2. Broadcasts `{ op: 'alert' }` via `UiHub` to every `/ui` WS client.
+1. Writes an `alert.app-down` row to `audit_logs` with `target_type='application_server'` and `target_id=<replica id>`.
+2. Broadcasts `{ op: 'alert' }` via `UiHub` to every `/ui` WS client, naming both app and server.
 3. Calls `bot.notifyAdmins(text)` if the Telegram bot is running.
 
-Debounce is 5 minutes per app (`applications.last_alert_at`). `expected_state` is **not** part of `APP_EDITABLE_FIELDS`; it's derived from action submission.
+Debounce is 5 minutes **per replica** (`application_servers.last_alert_at`). `expected_state` is derived from action submission — operators flip it by submitting a matching action, not by editing the row directly.
 
 ## Dashboard auth
 
