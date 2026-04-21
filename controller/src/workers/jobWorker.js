@@ -61,7 +61,11 @@ export function startWorkers({ broadcastUi, config }) {
     const queueJobId = job.id;
     await jobsRepo.markRunning(queueJobId, job.attemptsMade + 1).catch(() => {});
 
-    const app = await applications.get(Number(targetId));
+    // Fan-out deploys encode targetId as `${appId}@${serverId}` so the queue
+    // idempotency key stays unique per target server. Prefer an explicit
+    // payload.applicationId so we never have to parse that composite here.
+    const appId = payload?.applicationId ?? Number(targetId);
+    const app = await applications.get(appId);
     if (!app.enabled) {
       throw new PermanentError(`app ${app.name} is disabled`, { code: 'E_APP_DISABLED' });
     }
@@ -177,6 +181,7 @@ async function runControllerBuild({ job, app, triggeredBy, payload, store, confi
       targetId: `${app.id}@${targetServerId}`,
       triggeredBy,
       payload: {
+        applicationId: app.id,
         artifactId: artifact.id,
         releaseId,
         parentBuildQueueJobId: job.id,
@@ -196,6 +201,7 @@ async function runControllerBuild({ job, app, triggeredBy, payload, store, confi
       maxAttempts: RetryProfile[JobAction.DEPLOY].attempts,
       triggeredBy,
       payload: {
+        applicationId: app.id,
         artifactId: artifact.id,
         releaseId,
         serverIdOverride: targetServerId,

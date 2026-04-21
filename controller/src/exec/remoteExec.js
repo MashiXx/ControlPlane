@@ -256,7 +256,19 @@ export async function deployAction(app, artifact, releaseId, opts = {}) {
   const staging = await fs.mkdtemp(path.join(base, `cp-stage-${artifact.id}-`));
 
   try {
-    // 1. extract locally
+    // 1. extract locally. An orphaned artifact row (file GC'd, tmp wiped)
+    // is a permanent failure — retrying won't make the tarball reappear.
+    try {
+      await fs.stat(artifact.path);
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        throw new PermanentError(
+          `artifact #${artifact.id} tarball missing on controller: ${artifact.path}`,
+          { code: 'E_ARTIFACT_MISSING', meta: { artifactId: artifact.id, path: artifact.path } },
+        );
+      }
+      throw err;
+    }
     await pipeline(
       createReadStream(artifact.path),
       createGunzip(),
@@ -279,6 +291,29 @@ export async function deployAction(app, artifact, releaseId, opts = {}) {
     const swap = await runSsh(host, swapCmd, { timeoutMs: 30_000 });
     if (swap.exitCode !== 0) throw failForExit('symlink-swap', swap);
     log(onChunk, `swapped ${currentLink} → ${releaseDir}\n`);
+
+    // 4b. Expose each top-level entry of the release under the install path
+    // as its own symlink, e.g. <installPath>/target → <releaseDir>/target.
+    // Anything already sitting at <installPath>/<name> (stale symlink, real
+    // directory left over from a pre-agentless layout, regular file) is
+    // removed first — `mv -Tf` can't overwrite a directory with a non-
+    // directory, so the atomic-temp pattern we use for `current` doesn't
+    // work here.
+    // `current` and `releases` are skipped to protect controller-managed
+    // paths; `[ -e "$entry" ] || continue` guards an empty release dir
+    // (glob would expand to the literal `*`).
+    const aliasSwap =
+      `cd ${installPath}; `
+      + `for entry in ${releaseDir}/*; do `
+      +   `[ -e "$entry" ] || continue; `
+      +   `name=$(basename "$entry"); `
+      +   `case "$name" in current|releases) continue;; esac; `
+      +   `rm -rf -- "$name"; `
+      +   `ln -sfn "$entry" "$name"; `
+      + `done`;
+    const aliasRes = await runSsh(host, aliasSwap, { timeoutMs: 30_000 });
+    if (aliasRes.exitCode !== 0) throw failForExit('alias-symlinks', aliasRes);
+    log(onChunk, `linked top-level entries under ${installPath}\n`);
 
     // 5. stop (idempotent)
     const stopRemote = composeStopCmd(app);

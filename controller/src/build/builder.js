@@ -40,12 +40,19 @@ export async function runBuild({ app, store, artifactRepo, buildJobDbId, onChunk
   const configHash = hashConfig(app);
 
   // Check for an existing artifact that matches this (app, commit, config).
-  // Dedup hit → skip the whole build.
+  // Dedup hit → skip the whole build, but only if the tarball is still on
+  // disk. An `artifacts` row whose file was cleared (tmp wipe, fresh clone,
+  // operator `rm -rf`) is an orphan; treating it as a cache hit lets the
+  // deploy fail later with ENOENT.
   if (commitSha) {
     const existing = await artifactRepo.findByCommitAndConfig(app.id, commitSha, configHash);
-    if (existing) {
+    if (existing && await store.exists({ applicationId: app.id, sha256: existing.sha256 })) {
       logger.info({ appId: app.id, sha256: existing.sha256 }, 'build:cache-hit');
       return { artifact: existing, reused: true };
+    }
+    if (existing) {
+      logger.warn({ appId: app.id, artifactId: existing.id, sha256: existing.sha256 },
+        'build:orphan-artifact-row-rebuilding');
     }
   }
 
@@ -77,11 +84,14 @@ export async function runBuild({ app, store, artifactRepo, buildJobDbId, onChunk
     // 3. resolve commit sha actually checked out
     const resolvedSha = (await captureCmd('git rev-parse HEAD', { cwd: workdir })).trim();
 
-    // 4. dedup re-check with resolved sha
+    // 4. dedup re-check with resolved sha (same orphan-aware guard as above)
     const existing = await artifactRepo.findByCommitAndConfig(app.id, resolvedSha, configHash);
-    if (existing) {
+    if (existing && await store.exists({ applicationId: app.id, sha256: existing.sha256 })) {
       log(`cache-hit sha=${resolvedSha} → artifact #${existing.id}`);
       return { artifact: existing, reused: true };
+    }
+    if (existing) {
+      log(`cache-hit artifact #${existing.id} but tarball missing → rebuilding`);
     }
 
     // 5. install + build
