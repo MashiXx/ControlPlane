@@ -19,8 +19,14 @@ import tar from 'tar-fs';                      // lightweight streaming tar
 
 import { PermanentError, TransientError } from '@cp/shared/errors';
 import { createLogger } from '@cp/shared/logger';
+import { AUDIT_OUTPUT_LIMIT } from '@cp/shared/constants';
 
 const logger = createLogger({ service: 'builder' });
+
+// Bytes of stderr/stdout to keep in err.meta when a build command fails.
+// Enough to surface the failing maven/npm line in logs without blowing up
+// the audit payload.
+const ERR_OUTPUT_TAIL_BYTES = Math.min(AUDIT_OUTPUT_LIMIT, 4 * 1024);
 
 const BUILD_TIMEOUT_MS = Number(process.env.BUILD_TIMEOUT_MS ?? 30 * 60 * 1000);
 
@@ -174,18 +180,31 @@ export function hashConfig(app) {
 async function runCmd(cmd, { cwd, env, onChunk }) {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, { cwd, env: { ...process.env, ...(env ?? {}) }, shell: true });
+    // Accumulate the last ERR_OUTPUT_TAIL_BYTES of stdout+stderr so failures
+    // surface the actual compiler/maven/npm output in the error meta, not
+    // just "exit=1". onChunk still streams the full output to the WS log.
+    let stdoutTail = '';
+    let stderrTail = '';
+    const appendTail = (which, buf) => {
+      const s = buf.toString('utf8');
+      if (which === 'stdout') stdoutTail = (stdoutTail + s).slice(-ERR_OUTPUT_TAIL_BYTES);
+      else                    stderrTail = (stderrTail + s).slice(-ERR_OUTPUT_TAIL_BYTES);
+    };
     const killer = setTimeout(() => {
       try { child.kill('SIGKILL'); } catch { /* noop */ }
-      reject(new TransientError(`build timeout: ${cmd.slice(0, 60)}`));
+      reject(new TransientError(`build timeout: ${cmd.slice(0, 60)}`, {
+        code: 'E_BUILD_TIMEOUT',
+        meta: { stderrTail, stdoutTail },
+      }));
     }, BUILD_TIMEOUT_MS);
-    child.stdout.on('data', (b) => onChunk?.(b, 'stdout'));
-    child.stderr.on('data', (b) => onChunk?.(b, 'stderr'));
+    child.stdout.on('data', (b) => { appendTail('stdout', b); onChunk?.(b, 'stdout'); });
+    child.stderr.on('data', (b) => { appendTail('stderr', b); onChunk?.(b, 'stderr'); });
     child.on('error', (err) => { clearTimeout(killer); reject(err); });
     child.on('close', (code) => {
       clearTimeout(killer);
       if (code === 0) resolve();
       else reject(new TransientError(`cmd failed (exit=${code}): ${cmd.slice(0, 60)}`,
-        { code: 'E_BUILD_CMD_FAILED', meta: { exitCode: code } }));
+        { code: 'E_BUILD_CMD_FAILED', meta: { exitCode: code, stderrTail, stdoutTail } }));
     });
   });
 }
