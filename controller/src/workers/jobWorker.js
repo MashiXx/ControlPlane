@@ -60,7 +60,9 @@ export function startWorkers({ broadcastUi, config }) {
   const processor = async (job) => {
     const { action, targetId, triggeredBy, payload } = job.data;
     const queueJobId = job.id;
-    await jobsRepo.markRunning(queueJobId, job.attemptsMade + 1).catch(() => {});
+    // `queue/src/worker.js` bumps `attemptsMade` before calling this processor,
+    // so the value already reflects the current attempt number (1-indexed).
+    await jobsRepo.markRunning(queueJobId, job.attemptsMade).catch(() => {});
 
     // Fan-out deploys encode targetId as `${appId}@${serverId}` so the queue
     // idempotency key stays unique per target server. Prefer an explicit
@@ -151,7 +153,7 @@ export function startWorkers({ broadcastUi, config }) {
       await writeAudit({
         actor: triggeredBy, action, targetType: 'app', targetId: String(app.id),
         result: 'failure', message: s.message,
-        metadata: { code: s.code, transient: s.transient, attempt: job.attemptsMade + 1 },
+        metadata: { code: s.code, transient: s.transient, attempt: job.attemptsMade },
       });
       throw err;
     }
