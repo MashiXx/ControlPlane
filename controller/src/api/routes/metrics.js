@@ -12,7 +12,7 @@ export function metricsRouter() {
     try {
       const pool = getPool();
       const [appsByState] = await pool.query(
-        'SELECT process_state AS state, COUNT(*) AS n FROM applications GROUP BY process_state',
+        'SELECT process_state AS state, COUNT(*) AS n FROM application_servers GROUP BY process_state',
       );
       const [jobsByStatus] = await pool.query(
         `SELECT status, COUNT(*) AS n FROM jobs

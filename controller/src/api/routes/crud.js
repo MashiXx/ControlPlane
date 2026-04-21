@@ -61,7 +61,7 @@ export function crudRouter() {
       });
       res.status(201).json(row);
     } catch (e) {
-      if (e.code === 'ER_DUP_ENTRY') return next(new ConflictError('application name already exists on this server'));
+      if (e.code === 'ER_DUP_ENTRY') return next(new ConflictError('application name already exists'));
       next(e);
     }
   });

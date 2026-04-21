@@ -21,10 +21,9 @@ export const JobStatus = Object.freeze({
 });
 
 export const JobTargetType = Object.freeze({
-  APP:          'app',
-  GROUP:        'group',
-  SERVER:       'server',
-  SERVER_GROUP: 'server_group',
+  APP:    'app',
+  GROUP:  'group',
+  SERVER: 'server',
 });
 
 export const ProcessState = Object.freeze({

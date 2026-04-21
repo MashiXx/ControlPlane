@@ -4,8 +4,9 @@ import { apiClient } from './api.js';
 import { openGroupForm, confirmDeleteGroup } from './forms/group.js';
 import { openServerForm, confirmDeleteServer } from './forms/server.js';
 import { openApplicationForm, confirmDeleteApp } from './forms/application.js';
+import { openReplicasDialog } from './forms/replica.js';
 import {
-  openServerGroupForm, confirmDeleteServerGroup, deployToServerGroup,
+  openServerGroupForm, confirmDeleteServerGroup,
 } from './forms/serverGroup.js';
 
 const wsUrl = `${location.origin.replace(/^http/, 'ws')}/ui`;
@@ -88,32 +89,16 @@ function renderApps() {
 
   for (const a of filtered) {
     const groupName  = state.groups.find((g) => g.id === a.group_id)?.name ?? '-';
-    const serverName = state.servers.find((s) => s.id === a.server_id)?.name ?? String(a.server_id);
-    const expected = a.expected_state ?? 'stopped';
-    // Highlight a drift: expected running but actually stopped/crashed/unknown
-    // is what the alert manager pages on.
-    const drifted = expected === 'running'
-      && ['stopped', 'crashed', 'unknown'].includes(a.process_state);
-    const stopBtnLabel = expected === 'stopped' ? 'Resume' : 'Pause';
-    const stopBtnAction = expected === 'stopped' ? 'start' : 'stop';
 
-    const row = el('tr', { class: drifted ? 'row-drift' : '' }, [
+    const row = el('tr', {}, [
       el('td', {}, a.name),
       el('td', {}, groupName),
-      el('td', {}, serverName),
       el('td', {}, a.runtime),
-      el('td', {}, [badge(a.process_state, a.process_state)]),
-      el('td', {}, [badge(`expected-${expected}`, expected)]),
-      el('td', {}, a.pid == null ? '-' : String(a.pid)),
-      el('td', {}, a.uptime_seconds ? `${a.uptime_seconds}s` : '-'),
       el('td', {}, [
-        el('button', {
-          title: stopBtnAction === 'start' ? 'Start (resume) the app' : 'Stop (pause) the app',
-          onclick: () => enqueue(stopBtnAction, { type: 'app', id: a.id }),
-        }, stopBtnLabel),
-        el('button', { onclick: () => enqueue('restart', { type: 'app', id: a.id }) }, 'Restart'),
-        el('button', { onclick: () => enqueue('deploy',  { type: 'app', id: a.id }) }, 'Deploy'),
-        el('button', { onclick: () => enqueue('build',   { type: 'app', id: a.id }) }, 'Build'),
+        el('button', { onclick: async () => {
+          try { await openReplicasDialog(a, state.servers); }
+          catch (err) { alert(`Failed to load replicas: ${err.message}`); }
+        }}, 'Replicas'),
         el('button', { onclick: () => openApplicationForm({
           initial: a, servers: state.servers, groups: state.groups, onSaved: refresh,
         })}, 'Edit'),
@@ -138,9 +123,6 @@ function renderServerGroupsTab() {
       el('td', {}, g.description ?? ''),
       el('td', {}, String(g.member_count ?? 0)),
       el('td', {}, [
-        el('button', { onclick: () => deployToServerGroup({
-          group: g, apps: state.apps, onEnqueued: refresh,
-        })}, 'Deploy to group'),
         el('button', { onclick: () => openServerGroupForm({
           initial: g, servers: state.servers, onSaved: refresh,
         })}, 'Edit'),
@@ -246,13 +228,10 @@ function connectWs() {
 
 function onFrame(frame) {
   if (frame.op === 'state') {
-    for (const a of frame.apps ?? []) {
-      const existing = state.apps.find((x) => x.id === a.id);
-      if (existing) Object.assign(existing, {
-        process_state: a.state, pid: a.pid, uptime_seconds: a.uptimeSeconds,
-      });
-    }
-    renderApps();
+    // Per-replica state — re-fetch the full app list so the replica-count
+    // aggregate (inside the Replicas dialog) is fresh.
+    refresh().catch(() => {});
+    return;
   }
   if (frame.op === 'log:chunk') {
     const pre = $('#live-logs');

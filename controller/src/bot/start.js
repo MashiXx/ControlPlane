@@ -1,13 +1,13 @@
 // In-process Telegram bot. Started by controller/src/index.js when
 // TELEGRAM_TOKEN is set. Talks to the controller via BotApi (no HTTP).
 //
-// Commands match the previous standalone bot:
-//   /status                — overview of all apps
-//   /group <name>          — apps in a group
-//   /app <name>            — app detail
-//   /restart <group>       — restart all apps in a group
-//   /build <group>         — build all apps in a group
-//   /deploy <group>        — deploy all apps in a group
+// Commands:
+//   /status                          — overview of all apps (replica counts)
+//   /group <name>                    — apps in a group
+//   /app <name>                      — app detail with per-replica list
+//   /restart <app> <server|group:name|all>
+//   /stop    <app> <server|group:name|all>
+//   /deploy  <app> <server|group:name|all>
 
 import TelegramBot from 'node-telegram-bot-api';
 import { ControlPlaneError } from '@cp/shared/errors';
@@ -72,32 +72,55 @@ export function startBot({ logger }) {
     const apps = await api.listApplications();
     const app = apps.find((a) => a.name === name);
     if (!app) return send(msg.chat.id, `_app *${name}* not found_`);
-    const detail = await api.getApplication(app.id);
+    const replicas = await api.listReplicas(app.id);
     const lines = [
-      `*${detail.name}*  _${detail.process_state}_`,
-      `runtime: \`${detail.runtime}\`  pid: \`${detail.pid ?? '-'}\``,
-      `server: \`${detail.server_id}\`  branch: \`${detail.branch}\``,
-      `enabled: ${detail.enabled ? '✅' : '❌'}  trusted: ${detail.trusted ? '✅' : '❌'}`,
+      `*${app.name}* — ${replicas.length} replica(s)`,
+      `runtime: \`${app.runtime}\`  branch: \`${app.branch}\``,
+      `enabled: ${app.enabled ? '✅' : '❌'}  trusted: ${app.trusted ? '✅' : '❌'}`,
+      '',
+      ...replicas.map((r) =>
+        `• @${r.server_name}: _${r.process_state}_ (expected ${r.expected_state}${r.pid ? `, pid ${r.pid}` : ''})`,
+      ),
     ];
     await send(msg.chat.id, lines.join('\n'));
   }));
 
-  // /restart, /build, /deploy <group>
+  // /<action> <app> <server|group:name|all>
+  const parseServerArg = async (appId, raw) => {
+    if (raw === 'all') {
+      const rs = await api.listReplicas(appId);
+      return { serverIds: rs.map((r) => Number(r.server_id)) };
+    }
+    if (raw.startsWith('group:')) {
+      return { serverGroupId: raw.slice('group:'.length) };
+    }
+    // Assume a server name. Map to id.
+    const all = await api.listServers();
+    const s = all.find((x) => x.name === raw);
+    if (!s) throw new Error(`server '${raw}' not found`);
+    return { serverId: s.id };
+  };
+
   const actionCommands = [
-    { re: /^\/restart(?:@\w+)?\s+(\S+)/, action: JobAction.RESTART },
-    { re: /^\/build(?:@\w+)?\s+(\S+)/,   action: JobAction.BUILD   },
-    { re: /^\/deploy(?:@\w+)?\s+(\S+)/,  action: JobAction.DEPLOY  },
+    { re: /^\/restart(?:@\w+)?\s+(\S+)\s+(\S+)/, action: JobAction.RESTART },
+    { re: /^\/stop(?:@\w+)?\s+(\S+)\s+(\S+)/,    action: JobAction.STOP    },
+    { re: /^\/deploy(?:@\w+)?\s+(\S+)\s+(\S+)/,  action: JobAction.DEPLOY  },
   ];
   for (const { re, action } of actionCommands) {
     bot.onText(re, (msg, m) => guarded(msg, async () => {
       if (!isAdmin(msg)) return send(msg.chat.id, '_forbidden_');
-      const groupName = m[1];
+      const [, appName, serverArg] = m;
+      const apps = await api.listApplications();
+      const app = apps.find((a) => a.name === appName);
+      if (!app) return send(msg.chat.id, `_app *${appName}* not found_`);
+      const selector = await parseServerArg(app.id, serverArg);
       const result = await api.enqueue({
         action,
-        target: { type: JobTargetType.GROUP, id: groupName },
+        target: { type: JobTargetType.APP, id: app.id },
         triggeredBy: actorOf(msg),
+        options: selector,
       });
-      await send(msg.chat.id, `*${action}* → *${groupName}*\n${fmtEnqueueResult(result)}`);
+      await send(msg.chat.id, `*${action}* → *${appName}* (${serverArg})\n${fmtEnqueueResult(result)}`);
       const first = result.jobs?.[0];
       if (first?.jobId) pollJobStatus(msg.chat.id, first.jobId);
     }));

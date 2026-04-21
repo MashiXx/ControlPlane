@@ -14,13 +14,14 @@
 
 import { createWorker, enqueueAction, jobIdentity } from '@cp/queue';
 import {
-  JobAction, JobTargetType, QueueName, RetryProfile,
+  JobAction, JobTargetType, ProcessState, QueueName, RetryProfile,
 } from '@cp/shared/constants';
 import { PermanentError, serializeError } from '@cp/shared/errors';
 import { createLogger } from '@cp/shared/logger';
 
 import {
   applications, servers, artifacts as artifactsRepo, jobs as jobsRepo, deployments,
+  applicationServers,
 } from '../db/repositories.js';
 import { writeAudit } from '../audit/audit.js';
 
@@ -102,14 +103,32 @@ export function startWorkers({ broadcastUi, config }) {
       if (!exec) {
         throw new PermanentError(`unsupported action: ${action}`, { code: 'E_UNSUPPORTED_ACTION' });
       }
-      // serverIdOverride is carried through for server-group fan-outs
-      // (restart-after-failed-deploy style flows). For single-app actions
-      // the app's home server is used.
-      const server = await servers.get(
-        payload?.serverIdOverride ?? app.server_id,
-      );
+      const serverId = payload?.serverIdOverride;
+      if (!serverId) {
+        throw new PermanentError(`${action} job is missing payload.serverIdOverride`, {
+          code: 'E_NO_SERVER_OVERRIDE',
+        });
+      }
+      const server = await servers.get(serverId);
       const effectiveApp = { ...app, server_id: server.id };
       const result = await exec(effectiveApp, { onChunk });
+
+      // Reflect the reported state onto application_servers so the dashboard
+      // sees the outcome immediately rather than waiting for the next sweep.
+      // Best-effort: the poller will reconcile if the row write fails, but we
+      // log so a persistent mismatch (e.g. a removed replica row) is visible.
+      if (action === JobAction.START || action === JobAction.RESTART) {
+        await applicationServers.updateProcessState(
+          (await applicationServers.get(app.id, server.id)).id,
+          { state: ProcessState.RUNNING, startedAt: new Date() },
+        ).catch((err) => logger.warn({ err: err.message, appId: app.id, serverId: server.id }, 'replica:state-write-failed'));
+      } else if (action === JobAction.STOP) {
+        await applicationServers.updateProcessState(
+          (await applicationServers.get(app.id, server.id)).id,
+          { state: ProcessState.STOPPED, pid: null, uptime: null },
+        ).catch((err) => logger.warn({ err: err.message, appId: app.id, serverId: server.id }, 'replica:state-write-failed'));
+      }
+
       await jobsRepo.markFinished(queueJobId, 'success', {
         result: {
           exitCode:   result.exitCode ?? 0,
@@ -121,6 +140,7 @@ export function startWorkers({ broadcastUi, config }) {
       await writeAudit({
         actor: triggeredBy, action, targetType: 'app', targetId: String(app.id),
         result: 'success', message: combine(result.stdoutTail, result.stderrTail),
+        metadata: { serverId },
       });
       return result;
     } catch (err) {
@@ -167,11 +187,14 @@ async function runControllerBuild({ job, app, triggeredBy, payload, store, confi
 
   const releaseId = buildId ?? `${Math.floor(Date.now() / 1000)}-${(artifact.commit_sha ?? 'na').slice(0, 7)}`;
 
-  // When the orchestrator targeted a server_group, payload.deployServerIds
-  // carries the fan-out list. Otherwise deploy to the app's home server.
-  const targetServerIds = Array.isArray(payload?.deployServerIds) && payload.deployServerIds.length
-    ? payload.deployServerIds
-    : [app.server_id];
+  // The orchestrator always passes payload.deployServerIds (one or more replica
+  // server IDs). Fail fast if absent — old fallback to app.server_id is gone.
+  if (!Array.isArray(payload?.deployServerIds) || payload.deployServerIds.length === 0) {
+    throw new PermanentError('BUILD job missing payload.deployServerIds', {
+      code: 'E_BUILD_NO_TARGETS',
+    });
+  }
+  const targetServerIds = payload.deployServerIds;
 
   const deployEnqueues = [];
   for (const targetServerId of targetServerIds) {
@@ -232,8 +255,12 @@ async function runDeploy({ job, app, triggeredBy, payload, onChunk }) {
       code: 'E_DEPLOY_NO_ARTIFACT',
     });
   }
-  const targetServerId = payload.serverIdOverride ?? app.server_id;
-  const server = await servers.get(targetServerId);
+  if (!payload.serverIdOverride) {
+    throw new PermanentError('deploy job missing payload.serverIdOverride', {
+      code: 'E_NO_SERVER_OVERRIDE',
+    });
+  }
+  const server = await servers.get(payload.serverIdOverride);
   const artifact = await artifactsRepo.get(payload.artifactId);
   const releaseId = payload.releaseId
     ?? `${Math.floor(Date.now() / 1000)}-${(artifact.commit_sha ?? 'na').slice(0, 7)}`;
@@ -261,6 +288,12 @@ async function runDeploy({ job, app, triggeredBy, payload, onChunk }) {
       { onChunk },
     );
     if (deployId) await deployments.markDeployed(deployId).catch(() => {});
+    await applicationServers.onDeploySuccess({
+      applicationId: app.id,
+      serverId: server.id,
+      releaseId,
+      artifactId: artifact.id,
+    }).catch((err) => logger.warn({ err: err.message, appId: app.id, serverId: server.id }, 'replica:onDeploySuccess-failed'));
     return {
       artifactId: artifact.id,
       releaseId,

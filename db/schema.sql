@@ -1,7 +1,7 @@
 -- ControlPlane — MySQL 8 schema (agentless)
 -- Charset: utf8mb4 throughout. Engine: InnoDB for transactional integrity.
 --
--- Reflects migrations 001 → 004. The controller now drives every target
+-- Reflects migrations 001 → 005. The controller now drives every target
 -- action over SSH; there is no per-server agent process, no bearer token,
 -- no HTTP artifact pull. Connection details (User / Port / IdentityFile /
 -- ProxyJump) live in the controller's ~/.ssh/config — nothing is per-server
@@ -78,75 +78,43 @@ CREATE TABLE IF NOT EXISTS server_group_members (
 ) ENGINE=InnoDB;
 
 -- ─────────────────────────────────────────────────────────────────────────
--- applications — a managed process on a specific server
+-- applications — a managed application (server assignment via application_servers)
 -- ─────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS applications (
   id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   name            VARCHAR(64)   NOT NULL,
-  server_id       BIGINT UNSIGNED NOT NULL,
   group_id        BIGINT UNSIGNED NULL,
 
-  -- Phase 1 is Java-only. Node.js/PM2 support is deferred.
   runtime         ENUM('java') NOT NULL DEFAULT 'java',
-
-  -- Controller-only: build on the controller host, rsync the artifact to the
-  -- target. Kept as an enum so re-introducing alternate strategies is a
-  -- one-value change rather than a column-shape change.
   build_strategy  ENUM('controller') NOT NULL DEFAULT 'controller',
-  -- Glob, relative to the build workdir, used to collect the artifact.
-  -- Example: 'target/*.jar' or 'dist/**'
+
   artifact_pattern     VARCHAR(255) NULL,
-  -- Absolute path on the target server where releases are unpacked:
-  --   <remote_install_path>/releases/<build_id>/
-  --   <remote_install_path>/current → symlink to active release
   remote_install_path  VARCHAR(512) NULL,
 
-  -- git
   repo_url        VARCHAR(512)  NULL,
   branch          VARCHAR(128)  NOT NULL DEFAULT 'main',
-  -- Absolute path on the target server. start_cmd, stop_cmd etc. are invoked
-  -- in <remote_install_path>/current; workdir is the build workspace only.
   workdir         VARCHAR(512)  NOT NULL,
   install_cmd     VARCHAR(512)  NULL,
   build_cmd       VARCHAR(512)  NULL,
   start_cmd       VARCHAR(512)  NOT NULL,
   stop_cmd        VARCHAR(512)  NULL,
-  -- How start/stop/status is invoked on the target:
-  --   wrapped → controller synthesizes setsid+nohup wrapper + PID file
-  --   raw     → user provides full start/stop/status/logs commands
-  --   systemd → systemctl-managed
   launch_mode     ENUM('wrapped','raw','systemd') NOT NULL DEFAULT 'wrapped',
   status_cmd      VARCHAR(512)  NULL,
   logs_cmd        VARCHAR(512)  NULL,
   health_cmd      VARCHAR(512)  NULL,
   env             JSON          NULL,
 
-  -- runtime state, updated by the controller's state poller
-  process_state   ENUM('running','stopped','crashed','starting','unknown')
-                  NOT NULL DEFAULT 'unknown',
-  -- operator-expected state. Set by the orchestrator when start/stop/restart
-  -- jobs are enqueued; consulted by the alert detector.
-  expected_state  ENUM('running','stopped') NOT NULL DEFAULT 'stopped',
-  last_alert_at   TIMESTAMP     NULL,
-  pid             INT UNSIGNED  NULL,
-  last_started_at TIMESTAMP     NULL,
-  last_exit_code  INT           NULL,
-  last_exit_at    TIMESTAMP     NULL,
-  uptime_seconds  BIGINT UNSIGNED NULL,
-
   trusted         TINYINT(1)    NOT NULL DEFAULT 0,
   enabled         TINYINT(1)    NOT NULL DEFAULT 1,
 
   created_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  updated_at      TIMESTAMP     NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    ON UPDATE CURRENT_TIMESTAMP,
 
   PRIMARY KEY (id),
-  UNIQUE KEY uq_applications_name_server (name, server_id),
+  UNIQUE KEY uq_applications_name (name),
   KEY idx_applications_group   (group_id),
-  KEY idx_applications_server  (server_id),
-  KEY idx_applications_state   (process_state),
-  CONSTRAINT fk_applications_server FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE RESTRICT,
-  CONSTRAINT fk_applications_group  FOREIGN KEY (group_id)  REFERENCES `groups`(id) ON DELETE SET NULL
+  CONSTRAINT fk_applications_group FOREIGN KEY (group_id) REFERENCES `groups`(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 
 -- ─────────────────────────────────────────────────────────────────────────
@@ -172,6 +140,47 @@ CREATE TABLE IF NOT EXISTS artifacts (
 ) ENGINE=InnoDB;
 
 -- ─────────────────────────────────────────────────────────────────────────
+-- application_servers — per-replica runtime state (many-to-many: apps × servers)
+-- ─────────────────────────────────────────────────────────────────────────
+-- Each row represents one deployed replica of an application on a given server.
+-- Per-replica runtime columns (process_state, expected_state, pid, etc.) live
+-- here instead of on `applications`, enabling independent state tracking per host.
+CREATE TABLE IF NOT EXISTS application_servers (
+  id                   BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  application_id       BIGINT UNSIGNED NOT NULL,
+  server_id            BIGINT UNSIGNED NOT NULL,
+
+  process_state        ENUM('running','stopped','crashed','starting','unknown')
+                         NOT NULL DEFAULT 'unknown',
+  expected_state       ENUM('running','stopped') NOT NULL DEFAULT 'stopped',
+  pid                  INT UNSIGNED NULL,
+  last_started_at      TIMESTAMP NULL,
+  last_exit_code       INT NULL,
+  last_exit_at         TIMESTAMP NULL,
+  uptime_seconds       BIGINT UNSIGNED NULL,
+  last_alert_at        TIMESTAMP NULL,
+  unreachable_count    INT NOT NULL DEFAULT 0,
+
+  current_release_id   VARCHAR(64) NULL,
+  current_artifact_id  BIGINT UNSIGNED NULL,
+
+  created_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at           TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                         ON UPDATE CURRENT_TIMESTAMP,
+
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_application_servers_pair (application_id, server_id),
+  KEY idx_application_servers_server    (server_id),
+  KEY idx_application_servers_state     (process_state),
+  CONSTRAINT fk_app_servers_app
+    FOREIGN KEY (application_id) REFERENCES applications(id) ON DELETE CASCADE,
+  CONSTRAINT fk_app_servers_server
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_app_servers_artifact
+    FOREIGN KEY (current_artifact_id) REFERENCES artifacts(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+-- ─────────────────────────────────────────────────────────────────────────
 -- jobs — every queued action is recorded here
 -- ─────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS jobs (
@@ -182,7 +191,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 
   action          ENUM('start','stop','restart','build','deploy','healthcheck')
                   NOT NULL,
-  target_type     ENUM('app','group','server','server_group') NOT NULL,
+  target_type     ENUM('app','group','server') NOT NULL,
   application_id  BIGINT UNSIGNED NULL,
   group_id        BIGINT UNSIGNED NULL,
   server_id       BIGINT UNSIGNED NULL,
