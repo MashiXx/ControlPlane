@@ -406,13 +406,20 @@ export const applicationServers = {
     }
   },
   async setExpectedState(applicationId, serverId, expected, c) {
-    await conn(c).execute(
+    const [res] = await conn(c).execute(
       `UPDATE application_servers
           SET expected_state = :expected
         WHERE application_id = :applicationId AND server_id = :serverId`,
       { applicationId, serverId, expected },
     );
+    if (res.affectedRows === 0) {
+      throw new NotFoundError('application_server', `${applicationId}@${serverId}`);
+    }
   },
+  // Poller/alert-manager hot path: replicaId is always a live row from the
+  // same sweep's listForPoller read, so silent no-op on stale id is
+  // acceptable. setExpectedState/onDeploySuccess (point-writes from the
+  // orchestrator) do check affectedRows.
   async updateProcessState(replicaId, patch, c) {
     // patch: { state?, pid?, uptime?, exitCode?, exitAt?, startedAt?, unreachableCount? }
     await conn(c).execute(
@@ -450,7 +457,7 @@ export const applicationServers = {
     );
   },
   async onDeploySuccess({ applicationId, serverId, releaseId, artifactId }, c) {
-    await conn(c).execute(
+    const [res] = await conn(c).execute(
       `UPDATE application_servers
           SET current_release_id  = :releaseId,
               current_artifact_id = :artifactId,
@@ -458,6 +465,9 @@ export const applicationServers = {
         WHERE application_id = :applicationId AND server_id = :serverId`,
       { applicationId, serverId, releaseId, artifactId },
     );
+    if (res.affectedRows === 0) {
+      throw new NotFoundError('application_server', `${applicationId}@${serverId}`);
+    }
   },
 };
 
