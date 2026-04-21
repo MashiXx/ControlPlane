@@ -287,17 +287,6 @@ $('#groupFilter').addEventListener('change', (e) => {
 });
 
 $('#btn-refresh').addEventListener('click', () => refresh());
-$('#btn-restart-group').addEventListener('click', () => {
-  const g = state.groups.find((x) => String(x.id) === state.filterGroupId);
-  if (!g) return alert('Select a group first');
-  if (!confirm(`Restart all apps in group "${g.name}"?`)) return;
-  enqueue('restart', { type: 'group', id: g.name });
-});
-$('#btn-build-group').addEventListener('click', () => {
-  const g = state.groups.find((x) => String(x.id) === state.filterGroupId);
-  if (!g) return alert('Select a group first');
-  enqueue('build', { type: 'group', id: g.name });
-});
 
 $('#btn-new-app').addEventListener('click', () => openApplicationForm({
   servers: state.servers, groups: state.groups, onSaved: refresh,
