@@ -3,17 +3,19 @@
 // rows into the `jobs` table, and records an audit entry.
 //
 // Targets:
-//   - app          → single application (one job)
-//   - group        → every enabled app in an application-group (fan-out)
-//   - server_group → one application deployed to every server in a
-//                    server-group (build once, deploy N times)
+//   - app   → single application; requires options.serverId / serverIds /
+//             serverGroupId to select which replicas to act on.
+//   - group → every enabled app in an application-group; applies the same
+//             server selector to each app, skipping apps with no matching
+//             replicas (audit-logged).
 //
-// Every deploy is two-phase (build on controller → fan out deploy jobs) now
-// that agent-side build is gone.
+// Every deploy is two-phase (build on controller → fan out one deploy job per
+// target server).  Non-deploy actions are fanned out here, one job per replica.
 //
 // Side-effect: every successful enqueue also updates
-// `applications.expected_state` so the alert detector knows whether a
-// subsequent regression is operator-induced (no alert) or a real outage.
+// `application_servers.expected_state` per replica so the alert detector knows
+// whether a subsequent regression is operator-induced (no alert) or a real
+// outage.
 
 import { enqueueAction, jobIdentity } from '@cp/queue';
 import {
@@ -22,19 +24,67 @@ import {
 } from '@cp/shared/constants';
 import { NotFoundError, ValidationError } from '@cp/shared/errors';
 import {
-  applications, groups, serverGroups, jobs as jobsRepo,
+  applications, applicationServers, groups, serverGroups, jobs as jobsRepo,
 } from '../db/repositories.js';
 import { writeAudit } from '../audit/audit.js';
 
-// Which actions flip expected_state, and in which direction. Actions not in
-// this map leave expected_state untouched (e.g. build, healthcheck).
-const EXPECTED_STATE_FOR_ACTION = Object.freeze({
-  [JobAction.START]:   ExpectedState.RUNNING,
-  [JobAction.RESTART]: ExpectedState.RUNNING,
-  [JobAction.DEPLOY]:  ExpectedState.RUNNING,
-  [JobAction.STOP]:    ExpectedState.STOPPED,
-});
+/**
+ * Resolve `options` → concrete list of target server ids, intersected with
+ * the app's registered replicas. Throws ValidationError on any missing /
+ * ambiguous / out-of-set selector.
+ */
+async function resolveTargetServerIds(app, options = {}) {
+  const present = ['serverId', 'serverIds', 'serverGroupId']
+    .filter((k) => options[k] !== undefined && options[k] !== null);
+  if (present.length === 0) {
+    throw new ValidationError(
+      `action on app '${app.name}' requires options.serverId, options.serverIds, or options.serverGroupId`,
+    );
+  }
+  if (present.length > 1) {
+    throw new ValidationError(
+      `options.serverId, options.serverIds, options.serverGroupId are mutually exclusive (got ${present.join(', ')})`,
+    );
+  }
 
+  let requested;
+  if (options.serverId !== undefined) {
+    requested = [Number(options.serverId)];
+  } else if (Array.isArray(options.serverIds)) {
+    requested = options.serverIds.map(Number);
+  } else {
+    const sg = await resolveServerGroup(options.serverGroupId);
+    requested = await serverGroups.listMemberIds(sg.id);
+    if (requested.length === 0) {
+      throw new ValidationError(`server-group '${sg.name}' has no members`);
+    }
+  }
+
+  const replicaIds = new Set(await applicationServers.serverIdsForApp(app.id));
+  const targetIds = requested.filter((id) => replicaIds.has(id));
+
+  if (targetIds.length === 0) {
+    throw new ValidationError(
+      `no replicas of app '${app.name}' match the requested server set`,
+    );
+  }
+  // Surface the first requested-but-not-a-replica id for a clear error.
+  if (options.serverId !== undefined || Array.isArray(options.serverIds)) {
+    const stray = requested.find((id) => !replicaIds.has(id));
+    if (stray !== undefined) {
+      throw new ValidationError(`server ${stray} is not a replica of app '${app.name}'`);
+    }
+  }
+  return targetIds;
+}
+
+/**
+ * Validate and enqueue an action against one or more targets.
+ *
+ * @param {{ action: string, target: { type: string, id: string|number },
+ *           triggeredBy: string, options?: object }} params
+ * @returns {Promise<object[]>} Array of enqueue result objects.
+ */
 export async function submitAction({ action, target, triggeredBy, options = {} }) {
   if (!JobActions.includes(action)) {
     throw new ValidationError(`unknown action: ${action}`);
@@ -42,95 +92,108 @@ export async function submitAction({ action, target, triggeredBy, options = {} }
 
   if (target.type === JobTargetType.APP) {
     const app = await resolveApp(target.id);
-    return [await enqueueOne(action, app, triggeredBy, options)];
+    const serverIds = await resolveTargetServerIds(app, options);
+    return enqueueForApp(action, app, serverIds, triggeredBy, options);
   }
 
   if (target.type === JobTargetType.GROUP) {
     const group = await resolveGroup(target.id);
     const apps  = await applications.listByGroupName(group.name);
     if (apps.length === 0) throw new NotFoundError('group-applications', group.name);
-    const results = [];
+
+    const perApp = [];
     for (const app of apps) {
-      results.push(await enqueueOne(action, app, triggeredBy, options));
+      try {
+        const serverIds = await resolveTargetServerIds(app, options);
+        perApp.push(...await enqueueForApp(action, app, serverIds, triggeredBy, options));
+      } catch (err) {
+        if (err instanceof ValidationError && /no replicas/.test(err.message)) {
+          await writeAudit({
+            actor: triggeredBy, action: `${action}.group.skip`,
+            targetType: 'app', targetId: String(app.id),
+            result: 'info', message: err.message,
+          });
+          continue;
+        }
+        throw err;
+      }
     }
     await writeAudit({
       actor: triggeredBy, action: `${action}.group`, targetType: 'group',
       targetId: group.name, result: 'info',
-      message: `fanned out to ${apps.length} apps`,
-      metadata: { applications: apps.map((a) => a.name) },
+      message: `fanned out across ${perApp.length} replica-jobs in ${apps.length} apps`,
     });
-    return results;
+    return perApp;
   }
 
-  if (target.type === JobTargetType.SERVER_GROUP) {
-    return [await enqueueServerGroupDeploy({
-      action, serverGroupRef: target.id, triggeredBy, options,
-    })];
-  }
-
-  throw new ValidationError(`unsupported target.type: ${target.type}`);
+  // target.type='server_group' is gone. Surface a clear upgrade hint.
+  throw new ValidationError(
+    `target.type='${target.type}' is not supported; use target.type='app' with options.serverGroupId`,
+  );
 }
 
-async function enqueueOne(action, app, triggeredBy, options) {
+async function enqueueForApp(action, app, serverIds, triggeredBy, options) {
   if (action === JobAction.START && !app.start_cmd) {
     throw new ValidationError(`app ${app.name} has no start_cmd`);
   }
   if (!app.enabled) throw new ValidationError(`app ${app.name} is disabled`);
-  if (action === JobAction.RESTART && app.process_state === ProcessState.UNKNOWN) {
-    // Allowed, but logged — the poller will reconcile after the restart.
-  }
 
-  // Every deploy is two-phase: enqueue a BUILD here; the build worker chains
-  // one DEPLOY per target server.
+  // deploy goes through the build → fan-out path; other actions fan out here.
   if (action === JobAction.DEPLOY) {
-    return enqueueControllerBuild(app, triggeredBy, options);
+    return [await enqueueControllerBuild(app, triggeredBy, options, { deployServerIds: serverIds })];
   }
 
   const profile = RetryProfile[action];
+  const results = [];
 
-  // Commit the DB row BEFORE enqueueing. The in-process queue fires workers
-  // synchronously from `add()`, so the worker's row lookup would race an
-  // insert-after-enqueue.
-  const enqInput = {
-    action,
-    targetType: JobTargetType.APP,
-    targetId: app.id,
-    triggeredBy,
-    payload: { appName: app.name, serverId: app.server_id, options },
-  };
-  const identity = jobIdentity(enqInput);
+  for (const serverId of serverIds) {
+    // Composite targetId keeps per-server queue idempotency unique.
+    const enqInput = {
+      action,
+      targetType: JobTargetType.APP,
+      targetId: `${app.id}@${serverId}`,
+      triggeredBy,
+      payload: {
+        applicationId: app.id,
+        appName: app.name,
+        serverIdOverride: serverId,
+        options,
+      },
+    };
+    const identity = jobIdentity(enqInput);
+    const jobId = await jobsRepo.insert({
+      queueJobId: identity.queueJobId,
+      idempotencyKey: identity.idempotencyKey,
+      action,
+      targetType: JobTargetType.APP,
+      applicationId: app.id,
+      groupId: app.group_id,
+      serverId,
+      maxAttempts: profile.attempts,
+      triggeredBy,
+      payload: { applicationId: app.id, appName: app.name, serverIdOverride: serverId, options },
+    }).catch((err) => {
+      if (err?.code === 'ER_DUP_ENTRY') return null;
+      throw err;
+    });
 
-  const jobId = await jobsRepo.insert({
-    queueJobId: identity.queueJobId,
-    idempotencyKey: identity.idempotencyKey,
-    action,
-    targetType: JobTargetType.APP,
-    applicationId: app.id,
-    groupId: app.group_id,
-    serverId: app.server_id,
-    maxAttempts: profile.attempts,
-    triggeredBy,
-    payload: { appName: app.name, options },
-  }).catch(async (err) => {
-    if (err?.code === 'ER_DUP_ENTRY') return null;
-    throw err;
-  });
+    const enq = await enqueueAction(enqInput);
+    await applyExpectedState(app.id, serverId, action);
 
-  const enq = await enqueueAction(enqInput);
-
-  await applyExpectedState(app.id, action);
-
-  await writeAudit({
-    actor: triggeredBy, action, targetType: 'app', targetId: String(app.id),
-    jobId, result: 'info', message: `queued ${action} for ${app.name}`,
-  });
-
-  return {
-    jobId,
-    queueJobId: enq.queueJobId,
-    application: { id: app.id, name: app.name },
-    action,
-  };
+    await writeAudit({
+      actor: triggeredBy, action, targetType: 'app', targetId: String(app.id),
+      jobId, result: 'info',
+      message: `queued ${action} for ${app.name}@server#${serverId}`,
+    });
+    results.push({
+      jobId,
+      queueJobId: enq.queueJobId,
+      application: { id: app.id, name: app.name },
+      serverId,
+      action,
+    });
+  }
+  return results;
 }
 
 async function enqueueControllerBuild(
@@ -141,9 +204,11 @@ async function enqueueControllerBuild(
       `deploy requires repo_url, artifact_pattern and remote_install_path (app ${app.name})`,
     );
   }
+  if (!Array.isArray(deployServerIds) || deployServerIds.length === 0) {
+    throw new ValidationError('deploy requires at least one target server');
+  }
   const profile = RetryProfile[JobAction.BUILD];
 
-  // DB row before queue push — see comment in enqueueOne for the race.
   const enqInput = {
     action: JobAction.BUILD,
     targetType: JobTargetType.APP,
@@ -151,10 +216,9 @@ async function enqueueControllerBuild(
     triggeredBy,
     payload: {
       appName: app.name,
-      serverId: app.server_id,
+      applicationId: app.id,
       commitSha: options?.commitSha,
-      // When provided the build worker chains one DEPLOY per server id.
-      deployServerIds: deployServerIds ?? null,
+      deployServerIds,
       serverGroupName: serverGroupName ?? null,
       options,
     },
@@ -168,14 +232,10 @@ async function enqueueControllerBuild(
     targetType: JobTargetType.APP,
     applicationId: app.id,
     groupId: app.group_id,
-    serverId: app.server_id,
+    serverId: null,
     maxAttempts: profile.attempts,
     triggeredBy,
-    payload: {
-      deployServerIds: deployServerIds ?? null,
-      serverGroupName: serverGroupName ?? null,
-      options,
-    },
+    payload: { deployServerIds, serverGroupName: serverGroupName ?? null, options },
   }).catch((err) => {
     if (err?.code === 'ER_DUP_ENTRY') return null;
     throw err;
@@ -183,16 +243,17 @@ async function enqueueControllerBuild(
 
   const enq = await enqueueAction(enqInput);
 
-  // Deploy transitions the app to expected=running regardless of fan-out width.
-  await applyExpectedState(app.id, JobAction.DEPLOY);
+  // Flip expected=running per-replica so the alert detector understands the
+  // intent even if the deploy fails mid-way.
+  for (const sid of deployServerIds) {
+    await applyExpectedState(app.id, sid, JobAction.DEPLOY);
+  }
 
   await writeAudit({
     actor: triggeredBy, action: 'deploy.plan', targetType: 'app', targetId: String(app.id),
     jobId, result: 'info',
-    message: serverGroupName
-      ? `build-then-deploy for ${app.name} → server-group ${serverGroupName} (${deployServerIds?.length ?? 0} servers)`
-      : `build-then-deploy for ${app.name}`,
-    metadata: deployServerIds ? { serverGroupName, serverIds: deployServerIds } : undefined,
+    message: `build-then-deploy for ${app.name} → ${deployServerIds.length} server(s)`,
+    metadata: { serverIds: deployServerIds, serverGroupName: serverGroupName ?? null },
   });
 
   return {
@@ -202,43 +263,20 @@ async function enqueueControllerBuild(
     action: JobAction.DEPLOY,
     twoPhase: true,
     phase: 'build',
-    fanOut: deployServerIds
-      ? { serverGroupName, serverIds: deployServerIds }
-      : undefined,
+    fanOut: { serverIds: deployServerIds, serverGroupName: serverGroupName ?? null },
   };
 }
 
-// server_group deploy: build once on the controller, then fan out one deploy
-// per member server.
-async function enqueueServerGroupDeploy({ action, serverGroupRef, triggeredBy, options }) {
-  if (action !== JobAction.DEPLOY) {
-    throw new ValidationError(
-      `server_group target supports only action='deploy' (got '${action}')`,
-    );
-  }
-  const appRef = options?.applicationId ?? options?.applicationName;
-  if (!appRef) {
-    throw new ValidationError('server_group deploy requires options.applicationId');
-  }
-  const app = await resolveApp(appRef);
-  if (!app.enabled) throw new ValidationError(`app ${app.name} is disabled`);
-
-  const sg = await resolveServerGroup(serverGroupRef);
-  const memberIds = await serverGroups.listMemberIds(sg.id);
-  if (memberIds.length === 0) {
-    throw new ValidationError(`server-group ${sg.name} has no members`);
-  }
-
-  return enqueueControllerBuild(app, triggeredBy, options, {
-    deployServerIds: memberIds,
-    serverGroupName: sg.name,
-  });
-}
-
-async function applyExpectedState(appId, action) {
-  const next = EXPECTED_STATE_FOR_ACTION[action];
+async function applyExpectedState(appId, serverId, action) {
+  const map = {
+    [JobAction.START]:   ExpectedState.RUNNING,
+    [JobAction.RESTART]: ExpectedState.RUNNING,
+    [JobAction.DEPLOY]:  ExpectedState.RUNNING,
+    [JobAction.STOP]:    ExpectedState.STOPPED,
+  };
+  const next = map[action];
   if (!next) return;
-  await applications.setExpectedState(appId, next).catch(() => {});
+  await applicationServers.setExpectedState(appId, serverId, next).catch(() => {});
 }
 
 async function resolveApp(idOrName) {
