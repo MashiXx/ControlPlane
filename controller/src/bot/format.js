@@ -4,12 +4,23 @@ const emojiForJob = {
   pending: '🕒', running: '⚙️', success: '✅', failed: '❌', cancelled: '🚫',
 };
 
+// Emoji hint for app health, based on running/total replica counts.
+// ⚪ = not placed anywhere, 🔴 = zero running, 🟡 = partial, 🟢 = all up.
+export function appStatusEmoji(a) {
+  const run = a.replicaCountRunning ?? 0;
+  const tot = a.replicaCountTotal ?? 0;
+  if (tot === 0) return '⚪';
+  if (run === 0) return '🔴';
+  if (run < tot) return '🟡';
+  return '🟢';
+}
+
 export function fmtApps(apps) {
   if (!apps.length) return '_no applications_';
   return apps.map((a) => {
     const running = a.replicaCountRunning ?? '?';
     const total   = a.replicaCountTotal   ?? '?';
-    return `• *${escape(a.name)}*  ${running}/${total}  ${a.enabled ? '' : '(disabled)'}`;
+    return `${appStatusEmoji(a)} *${escape(a.name)}*  ${running}/${total}  ${a.enabled ? '' : '(disabled)'}`;
   }).join('\n');
 }
 
@@ -28,6 +39,6 @@ export function fmtEnqueueResult(result) {
   return lines.join('\n');
 }
 
-function escape(s) {
+export function escape(s) {
   return String(s).replace(/[_*`\[\]]/g, (ch) => `\\${ch}`);
 }
