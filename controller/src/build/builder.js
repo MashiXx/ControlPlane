@@ -118,9 +118,19 @@ export async function runBuild({ app, store, artifactRepo, buildJobDbId, onChunk
     }
     log(`collecting ${matches.length} file(s) → tar.gz`);
 
-    // 7. pack into tar.gz. Paths inside the tar are RELATIVE to workdir.
+    // 7. pack into tar.gz.
+    //
+    // Each match is pinned to the TOP of the tar under its own basename, so a
+    // pattern like `server-core/target` lands as `target/...` inside the tar
+    // (and thus `<release>/target/...` after extract, which is what the
+    // alias-symlink loop in remoteExec expects — it links one level deep).
+    //
+    // Collisions (`server-core/target` AND `server-web/target`) would clobber
+    // each other in the tar; fail fast so the operator fixes the pattern.
+    const entries = matches.map((m) => path.relative(workdir, m));
+    const rewrites = buildEntryRewrites(entries, app.artifact_pattern);
     await pipeline(
-      tar.pack(workdir, { entries: matches.map((m) => path.relative(workdir, m)) }),
+      tar.pack(workdir, { entries, map: (header) => rewriteEntryHeader(header, rewrites) }),
       createGzip({ level: 6 }),
       createWriteStream(tarPath),
     );
@@ -174,6 +184,10 @@ export function hashConfig(app) {
   h.update(String(app.build_cmd ?? ''));
   h.update('|');
   h.update(String(app.artifact_pattern ?? ''));
+  // tar layout version — bump to invalidate artifacts whose on-disk layout
+  // differs from current tar.pack rewriting rules. v2: match basenames
+  // hoisted to tar root (so `server-core/target` → `target/...`).
+  h.update('|layout:v2');
   return h.digest('hex');
 }
 
@@ -222,6 +236,35 @@ function captureCmd(cmd, { cwd }) {
 async function expandGlob(pattern, cwd) {
   const matched = await glob(pattern, { cwd, nodir: false, dot: false });
   return matched.map((f) => path.join(cwd, f));
+}
+
+function buildEntryRewrites(entries, patternForErr) {
+  const seen = new Map();
+  const rewrites = [];
+  for (const e of entries) {
+    const bn = path.posix.basename(e);
+    if (seen.has(bn)) {
+      throw new PermanentError(
+        `artifact_pattern '${patternForErr}' produced entries with colliding basename '${bn}': ${seen.get(bn)} vs ${e}`,
+        { code: 'E_ARTIFACT_COLLISION' },
+      );
+    }
+    seen.set(bn, e);
+    if (e !== bn) rewrites.push({ from: e, to: bn });
+  }
+  // longest match first so nested rewrites don't get shadowed
+  rewrites.sort((a, b) => b.from.length - a.from.length);
+  return rewrites;
+}
+
+function rewriteEntryHeader(header, rewrites) {
+  for (const { from, to } of rewrites) {
+    if (header.name === from || header.name.startsWith(from + '/')) {
+      header.name = to + header.name.slice(from.length);
+      break;
+    }
+  }
+  return header;
 }
 
 function safeEnv(env) {
