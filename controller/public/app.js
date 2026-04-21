@@ -94,6 +94,7 @@ function renderApps() {
       el('td', {}, a.name),
       el('td', {}, groupName),
       el('td', {}, a.runtime),
+      el('td', {}, `${a.replica_running ?? 0}/${a.replica_total ?? 0} running`),
       el('td', {}, [
         el('button', { onclick: async () => {
           try { await openReplicasDialog(a, state.servers); }

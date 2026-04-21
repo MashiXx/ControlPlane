@@ -260,6 +260,23 @@ export const applications = {
     const [rows] = await conn(c).execute('SELECT * FROM applications ORDER BY name');
     return rows;
   },
+  async listWithReplicaCounts(c) {
+    const [rows] = await conn(c).execute(
+      `SELECT a.*,
+              COALESCE(c.total, 0)   AS replica_total,
+              COALESCE(c.running, 0) AS replica_running
+         FROM applications a
+         LEFT JOIN (
+           SELECT application_id,
+                  COUNT(*) AS total,
+                  SUM(process_state = 'running') AS running
+             FROM application_servers
+            GROUP BY application_id
+         ) c ON c.application_id = a.id
+         ORDER BY a.name`,
+    );
+    return rows;
+  },
   async create(row, c) {
     const params = {};
     for (const col of APP_CREATE_COLUMNS) {

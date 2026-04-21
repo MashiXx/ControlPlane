@@ -47,7 +47,7 @@ export function readRouter() {
   });
 
   r.get('/applications', async (_req, res, next) => {
-    try { res.json(await applications.list()); } catch (e) { next(e); }
+    try { res.json(await applications.listWithReplicaCounts()); } catch (e) { next(e); }
   });
 
   r.get('/applications/:id', async (req, res, next) => {
