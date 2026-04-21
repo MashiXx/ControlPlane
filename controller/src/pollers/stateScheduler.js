@@ -120,6 +120,14 @@ export class StateScheduler {
     this.missCounts.set(server.id, n);
     logger.debug({ serverId: server.id, misses: n, err: err?.message }, 'poll:miss');
 
+    // Mirror the in-memory miss counter onto each replica row so the alert
+    // metadata + dashboard see the true value. We use the server-level count
+    // (not per-replica) because the probe failure is server-scoped.
+    for (const replica of replicas) {
+      await applicationServers.updateProcessState(replica.replica_id, { unreachableCount: n })
+        .catch((e) => logger.warn({ err: e.message, replicaId: replica.replica_id }, 'poll:miss-count-write-failed'));
+    }
+
     if (n >= STATE_POLL_MISS_LIMIT && server.status !== ServerStatus.UNREACHABLE) {
       await servers.updateStatus(server.id, ServerStatus.UNREACHABLE).catch(() => {});
       await applicationServers.markUnknownForServer(server.id).catch(() => {});
@@ -149,7 +157,7 @@ export class StateScheduler {
     }
 
     const { state, pid, uptime } = probe.parse(r);
-    await applicationServers.updateProcessState(replica.replica_id, { state, pid, uptime });
+    await applicationServers.updateProcessState(replica.replica_id, { state, pid, uptime, unreachableCount: 0 });
 
     this.broadcastUi({
       op: 'state',
