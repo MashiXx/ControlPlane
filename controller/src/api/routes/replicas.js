@@ -82,7 +82,9 @@ export function replicasRouter() {
       const serverId = parseId(req.params.serverId);
 
       // Reject if any job for this (app, server) is still queued/running.
-      const pending = await jobsRepo.countPendingForReplica(appId, serverId).catch(() => 0);
+      // Any DB error here must bubble up — silently treating it as zero
+      // would let the DELETE proceed without verifying the replica is idle.
+      const pending = await jobsRepo.countPendingForReplica(appId, serverId);
       if (pending > 0) {
         throw new ConflictError(
           `${pending} job(s) are still queued/running for this replica; wait or cancel them first`,
@@ -90,12 +92,7 @@ export function replicasRouter() {
         );
       }
 
-      try {
-        await applicationServers.remove(appId, serverId);
-      } catch (err) {
-        if (err instanceof NotFoundError) throw err;
-        throw err;
-      }
+      await applicationServers.remove(appId, serverId);
       await writeAudit({
         actor: actorOf(req), action: 'replica.removed',
         targetType: 'application_server', targetId: `${appId}@${serverId}`,
