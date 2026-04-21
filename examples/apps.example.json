@@ -15,10 +15,13 @@
       "labels": { "region": "eu", "env": "prod" }
     }
   ],
+  "server_groups": [
+    { "name": "eu-payments", "members": ["srv-eu-1", "srv-eu-2"] }
+  ],
   "applications": [
     {
       "name": "payments-api",
-      "serverNames": ["srv-eu-1"],
+      "serverName": "srv-eu-1",
       "groupName": "payment",
       "runtime": "java",
       "buildStrategy": "controller",
@@ -35,7 +38,7 @@
     },
     {
       "name": "ledger",
-      "serverNames": ["srv-eu-2"],
+      "serverGroupName": "eu-payments",
       "groupName": "payment",
       "runtime": "java",
       "buildStrategy": "controller",

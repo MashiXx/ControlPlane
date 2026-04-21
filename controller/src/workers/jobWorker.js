@@ -242,9 +242,7 @@ async function runControllerBuild({ job, app, triggeredBy, payload, store, confi
     reused,
     releaseId,
     deploys: deployEnqueues,
-    fanOut: payload?.serverGroupName
-      ? { serverGroupName: payload.serverGroupName, count: targetServerIds.length }
-      : undefined,
+    fanOut: { serverIds: targetServerIds, count: targetServerIds.length },
   };
 }
 

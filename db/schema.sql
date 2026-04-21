@@ -78,12 +78,19 @@ CREATE TABLE IF NOT EXISTS server_group_members (
 ) ENGINE=InnoDB;
 
 -- ─────────────────────────────────────────────────────────────────────────
--- applications — a managed application (server assignment via application_servers)
+-- applications — a managed application. Placement is single-valued: every
+-- app is pinned to exactly ONE server (server_id) OR exactly ONE server_group
+-- (server_group_id). The check constraint enforces at-most-one; the
+-- application layer (zod + repository) enforces exactly-one on write.
+-- The rows in `application_servers` are derived from this placement and
+-- managed by the controller, not operators.
 -- ─────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS applications (
   id              BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   name            VARCHAR(64)   NOT NULL,
   group_id        BIGINT UNSIGNED NULL,
+  server_id       BIGINT UNSIGNED NULL,
+  server_group_id BIGINT UNSIGNED NULL,
 
   runtime         ENUM('java') NOT NULL DEFAULT 'java',
   build_strategy  ENUM('controller') NOT NULL DEFAULT 'controller',
@@ -113,8 +120,17 @@ CREATE TABLE IF NOT EXISTS applications (
 
   PRIMARY KEY (id),
   UNIQUE KEY uq_applications_name (name),
-  KEY idx_applications_group   (group_id),
-  CONSTRAINT fk_applications_group FOREIGN KEY (group_id) REFERENCES `groups`(id) ON DELETE SET NULL
+  KEY idx_applications_group           (group_id),
+  KEY idx_applications_server_id       (server_id),
+  KEY idx_applications_server_group_id (server_group_id),
+  CONSTRAINT fk_applications_group
+    FOREIGN KEY (group_id) REFERENCES `groups`(id) ON DELETE SET NULL,
+  CONSTRAINT fk_applications_server
+    FOREIGN KEY (server_id) REFERENCES servers(id) ON DELETE RESTRICT,
+  CONSTRAINT fk_applications_server_group
+    FOREIGN KEY (server_group_id) REFERENCES server_groups(id) ON DELETE RESTRICT,
+  CONSTRAINT chk_applications_placement
+    CHECK (NOT (server_id IS NOT NULL AND server_group_id IS NOT NULL))
 ) ENGINE=InnoDB;
 
 -- ─────────────────────────────────────────────────────────────────────────

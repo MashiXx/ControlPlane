@@ -2,12 +2,16 @@
 // TELEGRAM_TOKEN is set. Talks to the controller via BotApi (no HTTP).
 //
 // Commands:
-//   /status                          — overview of all apps (replica counts)
-//   /group <name>                    — apps in a group
-//   /app <name>                      — app detail with per-replica list
-//   /restart <app> <server|group:name|all>
-//   /stop    <app> <server|group:name|all>
-//   /deploy  <app> <server|group:name|all>
+//   /status                    — overview of all apps (replica counts)
+//   /group <name>              — apps in a group
+//   /app <name>                — app detail with per-replica list
+//   /restart <app> [server]    — restart all replicas (or just the named one)
+//   /stop    <app> [server]    — stop    all replicas (or just the named one)
+//   /deploy  <app> [server]    — deploy  to all replicas (or just the named one)
+//
+// Placement is part of the app itself (single server OR single server-group),
+// so operators don't pick the whole group here; only optionally narrow the
+// action to one replica by server name.
 
 import TelegramBot from 'node-telegram-bot-api';
 import { ControlPlaneError } from '@cp/shared/errors';
@@ -85,16 +89,12 @@ export function startBot({ logger }) {
     await send(msg.chat.id, lines.join('\n'));
   }));
 
-  // /<action> <app> <server|group:name|all>
-  const parseServerArg = async (appId, raw) => {
-    if (raw === 'all') {
-      const rs = await api.listReplicas(appId);
-      return { serverIds: rs.map((r) => Number(r.server_id)) };
-    }
-    if (raw.startsWith('group:')) {
-      return { serverGroupId: raw.slice('group:'.length) };
-    }
-    // Assume a server name. Map to id.
+  // /<action> <app> [server]
+  // When `server` is omitted the orchestrator fans out to every replica.
+  // When present it must match a server name registered as a replica of
+  // the app (i.e. the server_id or one of the server_group members).
+  const parseServerArg = async (raw) => {
+    if (!raw) return {};
     const all = await api.listServers();
     const s = all.find((x) => x.name === raw);
     if (!s) throw new Error(`server '${raw}' not found`);
@@ -102,9 +102,9 @@ export function startBot({ logger }) {
   };
 
   const actionCommands = [
-    { re: /^\/restart(?:@\w+)?\s+(\S+)\s+(\S+)/, action: JobAction.RESTART },
-    { re: /^\/stop(?:@\w+)?\s+(\S+)\s+(\S+)/,    action: JobAction.STOP    },
-    { re: /^\/deploy(?:@\w+)?\s+(\S+)\s+(\S+)/,  action: JobAction.DEPLOY  },
+    { re: /^\/restart(?:@\w+)?\s+(\S+)(?:\s+(\S+))?/, action: JobAction.RESTART },
+    { re: /^\/stop(?:@\w+)?\s+(\S+)(?:\s+(\S+))?/,    action: JobAction.STOP    },
+    { re: /^\/deploy(?:@\w+)?\s+(\S+)(?:\s+(\S+))?/,  action: JobAction.DEPLOY  },
   ];
   for (const { re, action } of actionCommands) {
     bot.onText(re, (msg, m) => guarded(msg, async () => {
@@ -113,14 +113,15 @@ export function startBot({ logger }) {
       const apps = await api.listApplications();
       const app = apps.find((a) => a.name === appName);
       if (!app) return send(msg.chat.id, `_app *${appName}* not found_`);
-      const selector = await parseServerArg(app.id, serverArg);
+      const selector = await parseServerArg(serverArg);
       const result = await api.enqueue({
         action,
         target: { type: JobTargetType.APP, id: app.id },
         triggeredBy: actorOf(msg),
         options: selector,
       });
-      await send(msg.chat.id, `*${action}* → *${appName}* (${serverArg})\n${fmtEnqueueResult(result)}`);
+      const scope = serverArg ? `@${serverArg}` : '(all replicas)';
+      await send(msg.chat.id, `*${action}* → *${appName}* ${scope}\n${fmtEnqueueResult(result)}`);
       const first = result.jobs?.[0];
       if (first?.jobId) pollJobStatus(msg.chat.id, first.jobId);
     }));

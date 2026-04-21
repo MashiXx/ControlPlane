@@ -3,18 +3,21 @@
 // rows into the `jobs` table, and records an audit entry.
 //
 // Targets:
-//   - app   → single application; requires options.serverId / serverIds /
-//             serverGroupId to select which replicas to act on.
-//   - group → every enabled app in an application-group; applies the same
-//             server selector to each app, skipping apps with no matching
-//             replicas (audit-logged).
+//   - app   → single application; fan out to ALL the app's current replicas.
+//             `options.serverId` optionally narrows to one replica.
+//   - group → every enabled app in an application-group; each app fans out
+//             to its own replicas.
 //
-// Every deploy is two-phase (build on controller → fan out one deploy job per
-// target server).  Non-deploy actions are fanned out here, one job per replica.
+// Placement is a property of the app (server_id or server_group_id), NOT
+// per-action input. The caller doesn't pick servers — they edit the app.
+//
+// Every deploy is two-phase (build on controller → fan out one deploy job
+// per target server). Non-deploy actions are fanned out here, one job per
+// replica.
 //
 // Side-effect: every successful enqueue also updates
-// `application_servers.expected_state` per replica so the alert detector knows
-// whether a subsequent regression is operator-induced (no alert) or a real
+// `application_servers.expected_state` per replica so the alert detector
+// knows whether a subsequent regression is operator-induced or a real
 // outage.
 
 import { enqueueAction, jobIdentity } from '@cp/queue';
@@ -24,61 +27,38 @@ import {
 } from '@cp/shared/constants';
 import { NotFoundError, ValidationError } from '@cp/shared/errors';
 import {
-  applications, applicationServers, groups, serverGroups, jobs as jobsRepo,
+  applications, applicationServers, groups, jobs as jobsRepo,
 } from '../db/repositories.js';
 import { writeAudit } from '../audit/audit.js';
 
 /**
- * Resolve `options` → concrete list of target server ids, intersected with
- * the app's registered replicas. Throws ValidationError on any missing /
- * ambiguous / out-of-set selector.
+ * Resolve the list of target server ids for an action. Starts from the
+ * app's current replicas (derived from placement) and optionally narrows
+ * to a single replica when `options.serverId` is supplied — that mode is
+ * used by the dashboard's per-row Restart/Stop/Deploy buttons.
  */
 async function resolveTargetServerIds(app, options = {}) {
-  const present = ['serverId', 'serverIds', 'serverGroupId']
-    .filter((k) => options[k] !== undefined && options[k] !== null);
-  if (present.length === 0) {
+  if (app.server_id == null && app.server_group_id == null) {
     throw new ValidationError(
-      `action on app '${app.name}' requires options.serverId, options.serverIds, or options.serverGroupId`,
+      `app '${app.name}' has no placement; set server_id or server_group_id first`,
     );
   }
-  if (present.length > 1) {
+  const replicaIds = await applicationServers.serverIdsForApp(app.id);
+  if (replicaIds.length === 0) {
     throw new ValidationError(
-      `options.serverId, options.serverIds, options.serverGroupId are mutually exclusive (got ${present.join(', ')})`,
+      `app '${app.name}' has no replicas (placement resolves to 0 servers)`,
     );
   }
-
-  let requested;
-  if (options.serverId !== undefined) {
-    requested = [Number(options.serverId)];
-  } else if (Array.isArray(options.serverIds)) {
-    requested = options.serverIds.map(Number);
-  } else {
-    const sg = await resolveServerGroup(options.serverGroupId);
-    requested = await serverGroups.listMemberIds(sg.id);
-    if (requested.length === 0) {
-      throw new ValidationError(`server-group '${sg.name}' has no members`);
+  if (options.serverId != null) {
+    const id = Number(options.serverId);
+    if (!replicaIds.includes(id)) {
+      throw new ValidationError(
+        `server ${id} is not a replica of app '${app.name}'`,
+      );
     }
+    return [id];
   }
-
-  const replicaIds = new Set(await applicationServers.serverIdsForApp(app.id));
-  const targetIds = requested.filter((id) => replicaIds.has(id));
-
-  // For explicit-id selectors, surface the first non-replica id before the
-  // generic "no matches" error — the specific id is more actionable to the
-  // operator. For serverGroupId, silent-drop is intentional (bulk semantics).
-  if (options.serverId !== undefined || Array.isArray(options.serverIds)) {
-    const stray = requested.find((id) => !replicaIds.has(id));
-    if (stray !== undefined) {
-      throw new ValidationError(`server ${stray} is not a replica of app '${app.name}'`);
-    }
-  }
-
-  if (targetIds.length === 0) {
-    throw new ValidationError(
-      `no replicas of app '${app.name}' match the requested server set`,
-    );
-  }
-  return targetIds;
+  return replicaIds;
 }
 
 /**
@@ -110,7 +90,7 @@ export async function submitAction({ action, target, triggeredBy, options = {} }
         const serverIds = await resolveTargetServerIds(app, options);
         perApp.push(...await enqueueForApp(action, app, serverIds, triggeredBy, options));
       } catch (err) {
-        if (err instanceof ValidationError && /no replicas/.test(err.message)) {
+        if (err instanceof ValidationError && /no replicas|no placement/.test(err.message)) {
           await writeAudit({
             actor: triggeredBy, action: `${action}.group.skip`,
             targetType: 'app', targetId: String(app.id),
@@ -129,9 +109,8 @@ export async function submitAction({ action, target, triggeredBy, options = {} }
     return perApp;
   }
 
-  // target.type='server_group' is gone. Surface a clear upgrade hint.
   throw new ValidationError(
-    `target.type='${target.type}' is not supported; use target.type='app' with options.serverGroupId`,
+    `target.type='${target.type}' is not supported; use 'app' or 'group'`,
   );
 }
 
@@ -182,9 +161,9 @@ async function enqueueForApp(action, app, serverIds, triggeredBy, options) {
 
     const enq = await enqueueAction(enqInput);
 
-    // When jobsRepo.insert collided on the idempotency key, the original job
-    // is still owned by the first submitter — don't double-stamp expected
-    // state or write a duplicate audit.
+    // When jobsRepo.insert collided on the idempotency key, the original
+    // job is still owned by the first submitter — don't double-stamp
+    // expected state or write a duplicate audit.
     if (jobId !== null) {
       await applyExpectedState(app.id, serverId, action);
       await writeAudit({
@@ -206,7 +185,7 @@ async function enqueueForApp(action, app, serverIds, triggeredBy, options) {
 }
 
 async function enqueueControllerBuild(
-  app, triggeredBy, options, { deployServerIds, serverGroupName } = {},
+  app, triggeredBy, options, { deployServerIds } = {},
 ) {
   if (!app.repo_url || !app.artifact_pattern || !app.remote_install_path) {
     throw new ValidationError(
@@ -228,7 +207,6 @@ async function enqueueControllerBuild(
       applicationId: app.id,
       commitSha: options?.commitSha,
       deployServerIds,
-      serverGroupName: serverGroupName ?? null,
       options,
     },
   };
@@ -244,7 +222,7 @@ async function enqueueControllerBuild(
     serverId: null,
     maxAttempts: profile.attempts,
     triggeredBy,
-    payload: { deployServerIds, serverGroupName: serverGroupName ?? null, options },
+    payload: { deployServerIds, options },
   }).catch((err) => {
     if (err?.code === 'ER_DUP_ENTRY') return null;
     throw err;
@@ -253,8 +231,8 @@ async function enqueueControllerBuild(
   const enq = await enqueueAction(enqInput);
 
   if (jobId !== null) {
-    // Flip expected=running per-replica so the alert detector understands the
-    // intent even if the deploy fails mid-way.
+    // Flip expected=running per-replica so the alert detector understands
+    // the intent even if the deploy fails mid-way.
     for (const sid of deployServerIds) {
       await applyExpectedState(app.id, sid, JobAction.DEPLOY);
     }
@@ -262,7 +240,7 @@ async function enqueueControllerBuild(
       actor: triggeredBy, action: 'deploy.plan', targetType: 'app', targetId: String(app.id),
       jobId, result: 'info',
       message: `build-then-deploy for ${app.name} → ${deployServerIds.length} server(s)`,
-      metadata: { serverIds: deployServerIds, serverGroupName: serverGroupName ?? null },
+      metadata: { serverIds: deployServerIds },
     });
   }
 
@@ -273,7 +251,7 @@ async function enqueueControllerBuild(
     action: JobAction.DEPLOY,
     twoPhase: true,
     phase: 'build',
-    fanOut: { serverIds: deployServerIds, serverGroupName: serverGroupName ?? null },
+    fanOut: { serverIds: deployServerIds },
   };
 }
 
@@ -306,12 +284,4 @@ async function resolveGroup(idOrName) {
     : await groups.getByName(key);
   if (!group) throw new NotFoundError('group', idOrName);
   return group;
-}
-
-async function resolveServerGroup(idOrName) {
-  const key = String(idOrName);
-  if (/^\d+$/.test(key)) return serverGroups.get(Number(key));
-  const byName = await serverGroups.getByName(key);
-  if (!byName) throw new NotFoundError('server_group', idOrName);
-  return byName;
 }

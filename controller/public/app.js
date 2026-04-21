@@ -89,10 +89,16 @@ function renderApps() {
 
   for (const a of filtered) {
     const groupName  = state.groups.find((g) => g.id === a.group_id)?.name ?? '-';
+    const placement = a.server_name
+      ? `server: ${a.server_name}`
+      : a.server_group_name
+        ? `group: ${a.server_group_name}`
+        : '(unplaced)';
 
     const row = el('tr', {}, [
       el('td', {}, a.name),
       el('td', {}, groupName),
+      el('td', {}, placement),
       el('td', {}, a.runtime),
       el('td', {}, `${a.replica_running ?? 0}/${a.replica_total ?? 0} running`),
       el('td', {}, [
@@ -101,7 +107,8 @@ function renderApps() {
           catch (err) { alert(`Failed to load replicas: ${err.message}`); }
         }}, 'Replicas'),
         el('button', { onclick: () => openApplicationForm({
-          initial: a, servers: state.servers, groups: state.groups, onSaved: refresh,
+          initial: a, servers: state.servers, serverGroups: state.serverGroups,
+          groups: state.groups, onSaved: refresh,
         })}, 'Edit'),
         el('button', { class: 'danger', onclick: async () => {
           if (await confirmDeleteApp(a)) {
@@ -290,7 +297,8 @@ $('#groupFilter').addEventListener('change', (e) => {
 $('#btn-refresh').addEventListener('click', () => refresh());
 
 $('#btn-new-app').addEventListener('click', () => openApplicationForm({
-  servers: state.servers, groups: state.groups, onSaved: refresh,
+  servers: state.servers, serverGroups: state.serverGroups,
+  groups: state.groups, onSaved: refresh,
 }));
 $('#btn-new-group').addEventListener('click',  () => openGroupForm({ onSaved: refresh }));
 $('#btn-new-server').addEventListener('click', () => openServerForm({ onSaved: refresh }));

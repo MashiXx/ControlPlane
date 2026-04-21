@@ -36,7 +36,7 @@
       </div>
       <table id="apps-table">
         <thead><tr>
-          <th>Name</th><th>Group</th><th>Runtime</th>
+          <th>Name</th><th>Group</th><th>Placement</th><th>Runtime</th>
           <th>Replicas</th><th>Actions</th>
         </tr></thead>
         <tbody></tbody>
@@ -90,9 +90,9 @@
       <div class="toolbar">
         <button id="btn-new-server-group">+ New server group</button>
       </div>
-      <p class="hint">Server groups bundle target servers for deploy fan-out.
-        Pick an app, pick a group, and the controller builds once and
-        deploys to every member (via rsync or signed HTTP per-server).</p>
+      <p class="hint">Server groups bundle target servers. An app placed on
+        a group has one replica per member; changing membership auto-syncs
+        the app's replicas.</p>
       <table id="server-groups-table">
         <thead><tr>
           <th>Name</th><th>Description</th><th>Members</th><th>Actions</th>

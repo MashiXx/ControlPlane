@@ -61,18 +61,11 @@ export const apiClient = {
 
   listReplicas: (appId) => request('GET', `/applications/${appId}/servers`),
 
-  addReplica: (appId, serverId) => request(
-    'POST', `/applications/${appId}/servers`, { serverId },
-  ),
-
-  removeReplica: (appId, serverId) => request(
-    'DELETE', `/applications/${appId}/servers/${serverId}`,
-  ),
-
-  // Submit an action with an explicit server selector.
-  // `selector` is one of:
-  //   { serverId: N } | { serverIds: [N,...] } | { serverGroupId: N | 'name' }
-  submitAction: (action, appId, selector, extra = {}) => request(
+  // Submit an action. With placement living on the application itself,
+  // the orchestrator fans out to every replica by default. `selector` is
+  // optional: `{ serverId: N }` narrows the action to a single replica
+  // (used by the per-row buttons in the Replicas dialog).
+  submitAction: (action, appId, selector = {}, extra = {}) => request(
     'POST', '/actions',
     {
       action,

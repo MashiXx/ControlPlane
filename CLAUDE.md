@@ -39,7 +39,7 @@ These cut across multiple files and are easy to violate:
 - **Retry only on `TransientError`.** `shared/src/errors.js` defines `TransientError` vs `PermanentError`. The worker checks `err.transient`. Validation, auth, "command not whitelisted", "app disabled" are permanent → fail fast. `ssh exit 255`, `ssh timeout`, `rsync` non-zero, healthcheck non-zero → transient.
 - **Constants ↔ schema must stay aligned.** All enum values in `shared/src/constants.js` (`JobAction`, `JobStatus`, `LaunchMode`, `ProcessState`, `ServerStatus`, `Runtime`, `ExpectedState`) mirror MySQL `ENUM` columns in `db/schema.sql`. Adding a value requires editing both — and a migration.
 - **Phase 1 is Java-only.** `Runtime = {JAVA}` and `LaunchMode` excludes `pm2`. Node.js/PM2 support returns in phase 2 — do NOT reintroduce `node` as a runtime or `pm2` as a launch mode without a paired migration and UI work.
-- **Apps are multi-tenant across servers.** `applications.server_id` no longer exists; each app registers N replicas in `application_servers` (one row per (app, server) pair, carrying per-replica `process_state` / `expected_state` / `pid` / `last_alert_at` / `current_release_id`). Every action (deploy/start/stop/restart/healthcheck) must carry an explicit server selector — `options.serverId`, `options.serverIds`, or `options.serverGroupId`. `target.type='server_group'` is gone.
+- **Apps have a single placement.** Each `applications` row pins its deployment target via **exactly one** of `server_id` OR `server_group_id` (enforced by `chk_applications_placement` at DB level + zod `AppCreate`/`AppUpdate` at API level). `application_servers` still carries per-replica `process_state` / `expected_state` / `pid` / `last_alert_at` / `current_release_id`, but rows are **derived** from placement by `syncAppReplicas(appId)` — operators never edit that table directly. Changing `applications.server_id` / `server_group_id`, or changing a server-group's membership, re-runs the sync. Actions against an app default to fanning out to every current replica; `options.serverId` optionally narrows the action to one replica (used by the per-row buttons in the dashboard Replicas dialog). `options.serverIds`, `options.serverGroupId`, and `target.type='server_group'` are all gone.
 - **Every deploy builds on the controller.** `applications.build_strategy` is pinned to `'controller'` (the enum has only that value). There is no agent-side build path.
 - **Four named queues, not one.** `cp:restart`, `cp:build`, `cp:deploy`, `cp:system` (`QueueName` in constants). Each gets its own worker so a slow build can't starve restarts. `QueueForAction` maps actions to queues — extend both when adding an action.
 
@@ -64,13 +64,15 @@ Artifacts are deduped by `(application_id, sha256)` AND by `(application_id, com
 
 ## Server groups & fan-out deploy
 
-Separate from `groups` (which bundles *applications*): `server_groups` + `server_group_members` bundle **servers** as a reusable fan-out selector. An app can be registered on any subset of servers via `application_servers`; when submitting an action with `options.serverGroupId`, the orchestrator intersects the server-group's members with the app's replica set. The flow is:
+Separate from `groups` (which bundles *applications*): `server_groups` + `server_group_members` bundle **servers**. An app placed on a group has one replica per current member; adding or removing a member re-runs `syncAppReplicas` for every dependent app. The flow is:
 
 1. Operator creates a server-group (e.g. `eu-payments`) and picks member servers via the dashboard's "Server groups" tab.
-2. Operator registers the app on each server it should run on, via `POST /api/applications/:id/servers` (or the dashboard "Replicas" dialog).
-3. Operator (or bot/API) submits `POST /api/actions` with `{ action: 'deploy', target: { type: 'app', id: 42 }, options: { serverGroupId: 'eu-payments' } }`.
-4. Orchestrator resolves `targetServerIds = server_group_members ∩ application_servers`. Enqueues **one** BUILD carrying `payload.deployServerIds = [<intersected ids>]`.
+2. Operator creates or edits an application, picking either **Single server** (sets `applications.server_id`) or **Server group** (sets `applications.server_group_id`) — never both. `syncAppReplicas(appId)` fills `application_servers` from that placement.
+3. Operator (or bot/API) submits `POST /api/actions` with `{ action: 'deploy', target: { type: 'app', id: 42 } }`. No server selector required; the orchestrator reads the app's current replicas.
+4. Orchestrator enqueues **one** BUILD carrying `payload.deployServerIds = [<all current replicas>]`.
 5. On build success the build worker enqueues **N** deploy jobs — one per target server — each with `payload.serverIdOverride` so `deployAction` hits the right host.
+
+Per-replica surgery is still possible via `options.serverId` — the dashboard's Replicas dialog uses it for its Restart / Stop / Deploy buttons. The passed server must already be a replica of the app (i.e. `=applications.server_id` or a current member of `applications.server_group_id`).
 
 ## Expected state & alert-on-down
 

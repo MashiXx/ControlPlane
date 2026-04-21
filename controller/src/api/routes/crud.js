@@ -14,7 +14,7 @@ import {
   ServerGroupCreate, ServerGroupUpdate,
 } from '@cp/shared/schemas';
 import {
-  applications, groups, servers, serverGroups,
+  applications, groups, servers, serverGroups, syncAppReplicas,
 } from '../../db/repositories.js';
 import { writeAudit } from '../../audit/audit.js';
 
@@ -53,6 +53,8 @@ export function crudRouter() {
     try {
       const body = parse(AppCreate, req.body);
       const row = await applications.create(body);
+      // Seed replicas from the just-set placement.
+      await syncAppReplicas(row.id);
       await writeAudit({
         actor: actorOf(req), action: 'app.create',
         targetType: 'app', targetId: String(row.id),
@@ -71,7 +73,25 @@ export function crudRouter() {
       const id = parseId(req.params.id);
       const patch = parse(AppUpdate, req.body);
       const before = await applications.get(id);
+
+      // When the caller switches placement mode (server → group or vice
+      // versa) without nulling the previous column, clear it for them so
+      // the CHECK constraint never trips.
+      if (patch.server_id != null && patch.server_group_id === undefined
+          && before.server_group_id != null) {
+        patch.server_group_id = null;
+      }
+      if (patch.server_group_id != null && patch.server_id === undefined
+          && before.server_id != null) {
+        patch.server_id = null;
+      }
+
       const row = await applications.update(id, patch);
+      const placementChanged =
+        ('server_id' in patch        && patch.server_id        !== before.server_id) ||
+        ('server_group_id' in patch  && patch.server_group_id  !== before.server_group_id);
+      if (placementChanged) await syncAppReplicas(id);
+
       await writeAudit({
         actor: actorOf(req), action: 'app.update',
         targetType: 'app', targetId: String(id),
@@ -176,7 +196,15 @@ export function crudRouter() {
       const patch = parse(ServerGroupUpdate, req.body);
       const { serverIds, ...metaPatch } = patch;
       const row = await serverGroups.update(id, metaPatch);
-      if (serverIds) await serverGroups.replaceMembers(id, serverIds);
+      if (serverIds) {
+        await serverGroups.replaceMembers(id, serverIds);
+        // Every app whose placement is this group needs its replicas
+        // re-derived — membership changes are silent from the app's side.
+        const dependents = await serverGroups.listDependentAppIds(id);
+        for (const appId of dependents) {
+          await syncAppReplicas(appId);
+        }
+      }
       await writeAudit({
         actor: actorOf(req), action: 'server-group.update',
         targetType: 'server_group', targetId: String(id),

@@ -20,7 +20,9 @@ const COMMAND_FIELDS = [
   'status_cmd', 'logs_cmd', 'health_cmd',
 ];
 
-export function openApplicationForm({ initial, servers, groups, onSaved }) {
+export function openApplicationForm({
+  initial, servers, serverGroups = [], groups, onSaved,
+}) {
   const isEdit  = Boolean(initial);
   const running = isEdit && initial.process_state !== 'stopped';
 
@@ -38,6 +40,20 @@ export function openApplicationForm({ initial, servers, groups, onSaved }) {
     ? (typeof initial.env === 'string' ? initial.env : JSON.stringify(initial.env, null, 2))
     : '';
 
+  // Placement picker — exactly one of server_id / server_group_id is set.
+  // Default to 'server' mode for new apps; reflect the existing choice on
+  // edit. An app with no servers defined yet and no server-groups can't be
+  // created, but we still render the form so the operator sees the hint.
+  const initialPlacement = initial?.server_group_id != null ? 'group' : 'server';
+  const serverOpts = ['<option value="">— pick a server —</option>']
+    .concat(servers.map((s) =>
+      `<option value="${s.id}" ${initial?.server_id === s.id ? 'selected' : ''}>${escape(s.name)} (${escape(s.hostname)})</option>`,
+    )).join('');
+  const serverGroupOpts = ['<option value="">— pick a server group —</option>']
+    .concat(serverGroups.map((g) =>
+      `<option value="${g.id}" ${initial?.server_group_id === g.id ? 'selected' : ''}>${escape(g.name)} (${g.member_count ?? 0} member${g.member_count === 1 ? '' : 's'})</option>`,
+    )).join('');
+
   form.innerHTML = `
     ${bannerHtml}
     <fieldset><legend>Basics</legend>
@@ -52,6 +68,26 @@ export function openApplicationForm({ initial, servers, groups, onSaved }) {
           <option value="java" selected>java</option>
         </select>
         <small>Node.js &amp; PM2 return in phase 2.</small>
+      </label>
+    </fieldset>
+
+    <fieldset><legend>Placement</legend>
+      <small>An application runs on exactly one server OR one server-group. Changing this re-syncs the app's replicas.</small>
+      <label class="inline">
+        <input type="radio" name="placement_mode" value="server"
+               ${initialPlacement === 'server' ? 'checked' : ''}>
+        Single server
+      </label>
+      <label class="inline">
+        <input type="radio" name="placement_mode" value="group"
+               ${initialPlacement === 'group' ? 'checked' : ''}>
+        Server group
+      </label>
+      <label data-placement-block="server">Server
+        <select name="server_id">${serverOpts}</select>
+      </label>
+      <label data-placement-block="group">Server group
+        <select name="server_group_id">${serverGroupOpts}</select>
       </label>
     </fieldset>
 
@@ -123,6 +159,17 @@ export function openApplicationForm({ initial, servers, groups, onSaved }) {
       </label>
     </fieldset>
   `;
+
+  // Placement radio: show/hide the matching picker and clear the other one.
+  const refreshPlacement = () => {
+    const mode = form.querySelector('[name=placement_mode]:checked')?.value ?? 'server';
+    for (const block of form.querySelectorAll('[data-placement-block]')) {
+      block.style.display = block.dataset.placementBlock === mode ? '' : 'none';
+    }
+  };
+  form.querySelectorAll('[name=placement_mode]').forEach((el) =>
+    el.addEventListener('change', refreshPlacement));
+  refreshPlacement();
 
   // Runtime defaults: fill blank cmd/pattern fields when runtime changes.
   form.querySelector('[name=runtime]').addEventListener('change', (e) => {
@@ -215,6 +262,24 @@ function collect(form, isEdit) {
   const gid = fd.get('group_id');
   if (gid === '') payload.group_id = null;
   else if (gid != null) payload.group_id = Number(gid);
+
+  // Placement: exactly one of server_id / server_group_id is sent.
+  // The other is explicitly nulled so the PATCH handler switches modes
+  // cleanly without tripping the XOR check constraint.
+  const mode = fd.get('placement_mode');
+  if (mode === 'server') {
+    const sid = fd.get('server_id');
+    if (!sid) throw new Error('Placement: pick a server');
+    payload.server_id = Number(sid);
+    payload.server_group_id = null;
+  } else if (mode === 'group') {
+    const sgid = fd.get('server_group_id');
+    if (!sgid) throw new Error('Placement: pick a server group');
+    payload.server_group_id = Number(sgid);
+    payload.server_id = null;
+  } else {
+    throw new Error('Placement: pick server or server group');
+  }
 
   copyStr('runtime');
   copyStr('artifact_pattern');
