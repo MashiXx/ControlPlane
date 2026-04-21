@@ -321,16 +321,6 @@ export const applications = {
       connection.release();
     }
   },
-  // Set operator-expected state. Called from the orchestrator when a lifecycle
-  // action is enqueued: start/restart/deploy → running, stop → stopped.
-  // Deliberately NOT exposed through the CRUD update whitelist — expected
-  // state is derived from action submission, never user-patched directly.
-  async setExpectedState(id, expected, c) {
-    await conn(c).execute(
-      'UPDATE applications SET expected_state = :expected WHERE id = :id',
-      { id, expected },
-    );
-  },
 };
 
 // ─── application_servers (per-replica state) ───────────────────────────
