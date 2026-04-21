@@ -4,7 +4,6 @@ import { apiClient } from './api.js';
 import { openGroupForm, confirmDeleteGroup } from './forms/group.js';
 import { openServerForm, confirmDeleteServer } from './forms/server.js';
 import { openApplicationForm, confirmDeleteApp } from './forms/application.js';
-import { openReplicasDialog } from './forms/replica.js';
 import {
   openServerGroupForm, confirmDeleteServerGroup,
 } from './forms/serverGroup.js';
@@ -72,6 +71,18 @@ async function enqueue(action, target, options) {
   }
 }
 
+// Enqueue an action against an app, deriving target servers from the app's
+// placement. No selector needed — the orchestrator fans out automatically.
+async function enqueueAction(action, appId) {
+  try {
+    await apiClient.submitAction(action, appId);
+    // State change will arrive via WS; refresh in case WS lags.
+    await refresh();
+  } catch (err) {
+    alert(err.message);
+  }
+}
+
 // ─── render ─────────────────────────────────────────────────────────────
 function renderGroupsFilter() {
   const sel = $('#groupFilter');
@@ -102,10 +113,9 @@ function renderApps() {
       el('td', {}, a.runtime),
       el('td', {}, `${a.replica_running ?? 0}/${a.replica_total ?? 0} running`),
       el('td', {}, [
-        el('button', { onclick: async () => {
-          try { await openReplicasDialog(a, state.servers); }
-          catch (err) { alert(`Failed to load replicas: ${err.message}`); }
-        }}, 'Replicas'),
+        el('button', { onclick: () => enqueueAction('restart', a.id) }, 'Restart'),
+        el('button', { onclick: () => enqueueAction('stop',    a.id) }, 'Stop'),
+        el('button', { onclick: () => enqueueAction('deploy',  a.id) }, 'Deploy'),
         el('button', { onclick: () => openApplicationForm({
           initial: a, servers: state.servers, serverGroups: state.serverGroups,
           groups: state.groups, onSaved: refresh,
