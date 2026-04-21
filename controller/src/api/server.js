@@ -7,6 +7,7 @@ import { authRouter } from './routes/auth.js';
 import { actionsRouter } from './routes/actions.js';
 import { readRouter } from './routes/read.js';
 import { crudRouter } from './routes/crud.js';
+import { replicasRouter } from './routes/replicas.js';
 import { metricsRouter } from './routes/metrics.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { requestLog } from './middleware/requestLog.js';
@@ -40,6 +41,7 @@ export function buildHttpApp({
 
   // Everything under /api requires bearer OR session cookie.
   app.use('/api', requireAuth({ apiTokens, sessionSecret }));
+  app.use('/api', replicasRouter());
   app.use('/api', readRouter());
   app.use('/api', metricsRouter());
   app.use('/api', crudRouter());

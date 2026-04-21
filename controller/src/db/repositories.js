@@ -542,6 +542,16 @@ export const jobs = {
     );
     return rows;
   },
+  async countPendingForReplica(applicationId, serverId, c) {
+    const [rows] = await conn(c).execute(
+      `SELECT COUNT(*) AS n FROM jobs
+         WHERE application_id = :applicationId
+           AND server_id = :serverId
+           AND status IN ('pending','running')`,
+      { applicationId, serverId },
+    );
+    return Number(rows[0].n);
+  },
 };
 
 // ─── artifacts ──────────────────────────────────────────────────────────
