@@ -75,6 +75,9 @@ web_modules/
 # so it's easy to inspect and safe to wipe.
 tmp/
 
+# Local git worktrees for feature branches (subagent-driven development etc.)
+.worktrees/
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache
