@@ -65,15 +65,6 @@ export class CommandNotAllowedError extends PermanentError {
   }
 }
 
-export class AgentUnavailableError extends TransientError {
-  constructor(serverId) {
-    super(`agent for server ${serverId} is not connected`, {
-      code: 'E_AGENT_UNAVAILABLE',
-      meta: { serverId },
-    });
-  }
-}
-
 export class TimeoutError extends TransientError {
   constructor(op, ms) {
     super(`${op} timed out after ${ms}ms`, { code: 'E_TIMEOUT', meta: { op, ms } });

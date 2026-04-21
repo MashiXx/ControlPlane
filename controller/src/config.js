@@ -32,18 +32,11 @@ export function loadControllerConfig() {
       database: process.env.DB_NAME ?? 'controlplane',
       connectionLimit: Number(process.env.DB_POOL_SIZE ?? 10),
     },
-    jobDispatchTimeoutMs: Number(process.env.JOB_DISPATCH_TIMEOUT_MS ?? 15 * 60 * 1000),
-    heartbeatMissLimitMs: Number(process.env.HEARTBEAT_MISS_MS ?? 35_000),
-
     // Controller-side build + artifact storage. All ephemeral/app-owned files
     // live under a single project-local `tmp/` tree by default so operators
     // can tail and inspect them next to the source. CP_TMP_DIR moves the whole
     // tree; the per-subdir vars override a single leaf.
     ...resolveTmpLayout(),
-    // Secret used to sign artifact download URLs (distinct from jwtSecret)
-    artifactSecret:   process.env.ARTIFACT_SIGNING_SECRET ?? process.env.CONTROLLER_JWT_SECRET ?? 'change-me',
-    // How agents reach the controller for artifact download (host:port external)
-    publicBaseUrl:    process.env.CONTROLLER_PUBLIC_URL ?? 'http://127.0.0.1:8080',
   };
 }
 

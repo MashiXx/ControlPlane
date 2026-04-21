@@ -1,8 +1,9 @@
 // AlertManager — centralised alert-on-down detector.
 //
-// The controller gets a heartbeat every ~10s from each agent carrying each
-// app's current process_state. This module compares the incoming state with
-// what the operator *expected* (applications.expected_state, set by the
+// The state scheduler runs an SSH probe every STATE_POLL_INTERVAL_MS (30s
+// by default) against each server and each enabled app. For every probe
+// result it calls evaluate() here; the manager compares the reported state
+// with what the operator *expected* (applications.expected_state, set by the
 // orchestrator when start/stop/restart/deploy was enqueued) and fires an
 // alert whenever:
 //
@@ -12,8 +13,7 @@
 //     'unknown' → process vanished without operator consent.
 //
 // An operator-initiated stop flips expected_state to 'stopped' *before* the
-// agent gets the stop command, so the subsequent "stopped" heartbeat is
-// silent (by design).
+// stop command runs, so the subsequent "stopped" observation is silent.
 //
 // Debounce: once an alert fires, applications.last_alert_at is stamped and
 // we suppress further alerts for the same app until DEBOUNCE_MS elapses —

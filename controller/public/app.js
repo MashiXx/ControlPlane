@@ -2,7 +2,7 @@
 
 import { apiClient } from './api.js';
 import { openGroupForm, confirmDeleteGroup } from './forms/group.js';
-import { openServerForm, rotateServerToken, confirmDeleteServer } from './forms/server.js';
+import { openServerForm, confirmDeleteServer } from './forms/server.js';
 import { openApplicationForm, confirmDeleteApp } from './forms/application.js';
 import {
   openServerGroupForm, confirmDeleteServerGroup, deployToServerGroup,
@@ -215,11 +215,9 @@ function renderServersTab() {
       el('td', {}, s.name),
       el('td', {}, s.hostname),
       el('td', {}, [badge(s.status ?? 'unknown', s.status ?? 'unknown')]),
-      el('td', {}, s.artifact_transfer),
       el('td', {}, s.last_seen_at ?? '-'),
       el('td', {}, [
         el('button', { onclick: () => openServerForm({ initial: s, onSaved: refresh }) }, 'Edit'),
-        el('button', { onclick: () => rotateServerToken(s, refresh) }, 'Rotate'),
         el('button', { class: 'danger', onclick: async () => {
           if (await confirmDeleteServer(s)) {
             try { await apiClient.deleteServer(s.id); await refresh(); }

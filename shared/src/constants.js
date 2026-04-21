@@ -1,4 +1,4 @@
-// Enumerations & constants shared across controller, agent, and queue.
+// Enumerations & constants shared across controller and queue.
 // Keep these aligned with the ENUM columns in db/schema.sql.
 
 export const JobAction = Object.freeze({
@@ -36,7 +36,7 @@ export const ProcessState = Object.freeze({
 });
 
 // Operator-expected lifecycle state. Used by the alert detector to decide
-// whether an agent-reported state transition is a regression worth paging on.
+// whether a state regression observed by the poller is a real outage.
 export const ExpectedState = Object.freeze({
   RUNNING: 'running',
   STOPPED: 'stopped',
@@ -50,36 +50,20 @@ export const ServerStatus = Object.freeze({
 });
 
 // ControlPlane phase 1 is Java-only. Node.js / PM2 support is deferred to a
-// later phase — the enum deliberately has a single value so the rest of the
-// stack (validators, UI, migrations) can't silently accept other runtimes.
+// later phase — the enum deliberately has a single value.
 export const Runtime = Object.freeze({
   JAVA: 'java',
 });
 
-export const BuildStrategy = Object.freeze({
-  TARGET:     'target',      // build on target server (agent)
-  CONTROLLER: 'controller',  // build on controller host, copy artifact to target
-  BUILDER:    'builder',     // future: dedicated builder pool
-});
-
 // PM2 is intentionally absent in phase 1 (Java deployments don't use pm2).
-// It will come back alongside Node.js support in a later phase.
 export const LaunchMode = Object.freeze({
   WRAPPED: 'wrapped',
   RAW:     'raw',
   SYSTEMD: 'systemd',
 });
 
-export const ArtifactTransfer = Object.freeze({
-  HTTP:  'http',   // agent pulls from controller
-  RSYNC: 'rsync',  // controller pushes via rsync+ssh
-});
-
 // How many releases to retain on target (older ones gc'd).
 export const RELEASE_RETENTION_COUNT = 5;
-
-// Short-lived token for artifact download URLs.
-export const ARTIFACT_TOKEN_TTL_SEC = 5 * 60;
 
 // Named in-process queues. Separate queues so a slow build never starves restarts.
 export const QueueName = Object.freeze({
@@ -120,32 +104,29 @@ function envAttempts(action, fallback) {
   return Number.isInteger(n) && n >= 1 ? n : fallback;
 }
 
-// WebSocket frame opcodes (controller ↔ agent).
+// WebSocket frame opcodes — dashboard-only now. The agent protocol is gone.
 export const WsOp = Object.freeze({
-  // agent → controller
-  HELLO:       'hello',          // { agentId, authToken, version, os }
-  HEARTBEAT:   'heartbeat',      // { ts, apps: [{id, state, pid, uptime}] }
-  JOB_UPDATE:  'job:update',     // progress updates from the agent
-  JOB_RESULT:  'job:result',     // terminal result
-  LOG_CHUNK:   'log:chunk',      // streamed stdout/stderr
-  // controller → agent
-  WELCOME:     'welcome',        // { sessionId, heartbeatMs }
-  EXECUTE:     'execute',        // { jobId, action, app, options }
-  CANCEL:      'cancel',         // { jobId }
-  REFRESH:     'refresh',        // pull-based state refresh
-  // both directions
+  // controller → /ui clients
+  JOB_UPDATE:  'job:update',
+  JOB_RESULT:  'job:result',
+  LOG_CHUNK:   'log:chunk',
+  STATE:       'state',
+  ALERT:       'alert',
   ERROR:       'error',
-  PONG:        'pong',
-  PING:        'ping',
 });
 
 // Idempotency: a repeated action against the same target inside this window
 // returns the existing job instead of enqueueing a new one.
 export const IDEMPOTENCY_WINDOW_MS = 5_000;
 
-// Agent → controller heartbeat cadence & detection threshold.
-export const HEARTBEAT_INTERVAL_MS  = 10_000;
-export const HEARTBEAT_MISS_LIMIT   = 3;
+// How often the controller SSH-polls each reachable server for liveness +
+// per-app process state. Overridable with STATE_POLL_INTERVAL_MS.
+export const STATE_POLL_INTERVAL_MS = Number(
+  process.env.STATE_POLL_INTERVAL_MS ?? 30_000,
+);
+
+// After this many consecutive failed probes the server flips to 'unreachable'.
+export const STATE_POLL_MISS_LIMIT = 3;
 
 // Max bytes of command output retained in the audit log per job.
 export const AUDIT_OUTPUT_LIMIT     = 8 * 1024;

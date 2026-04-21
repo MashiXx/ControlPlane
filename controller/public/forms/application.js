@@ -77,13 +77,8 @@ export function openApplicationForm({ initial, servers, groups, onSaved }) {
       </label>
     </fieldset>
 
-    <fieldset><legend>Build</legend>
-      <label>Build strategy
-        <select name="build_strategy">
-          ${['target','controller','builder'].map((v) =>
-            `<option value="${v}" ${initial?.build_strategy === v ? 'selected' : ''}>${v}</option>`).join('')}
-        </select>
-      </label>
+    <fieldset><legend>Build (on controller)</legend>
+      <small>Every app builds on the controller and deploys via rsync+ssh.</small>
       <label>Install cmd
         <input name="install_cmd" maxlength="512" value="${escape(initial?.install_cmd)}">
       </label>
@@ -237,7 +232,6 @@ function collect(form, isEdit) {
   else if (gid != null) payload.group_id = Number(gid);
 
   copyStr('runtime');
-  copyStr('build_strategy');
   copyStr('artifact_pattern');
   copyStr('remote_install_path');
   copyStr('repo_url');

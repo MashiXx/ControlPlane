@@ -1,18 +1,12 @@
-// CRUD endpoints for applications / groups / servers.
+// CRUD endpoints for applications / groups / servers / server-groups.
 // Mounted under /api by buildHttpApp; sits behind requireAuth.
 //
 // Writes happen directly on the repository layer — NOT through the
 // orchestrator. Metadata mutations aren't jobs; only target-server
 // actions (restart/build/deploy) go through enqueueAction.
-//
-// Every successful mutation writes an audit_logs row via writeAudit
-// (actor, action, target, result, httpStatus, metadata). Env values
-// and raw tokens are NEVER logged.
 
 import { Router } from 'express';
-import crypto from 'node:crypto';
 import { ValidationError, ConflictError } from '@cp/shared/errors';
-import { sha256Hex } from '@cp/shared/ids';
 import {
   AppCreate, AppUpdate,
   GroupCreate, GroupUpdate,
@@ -51,7 +45,7 @@ const parseId = (raw) => {
   return id;
 };
 
-export function crudRouter({ getWsHub }) {
+export function crudRouter() {
   const r = Router();
 
   // ─── applications ─────────────────────────────────────────────────────
@@ -154,11 +148,6 @@ export function crudRouter({ getWsHub }) {
   });
 
   // ─── server-groups (deploy fan-out targets) ──────────────────────────
-  //
-  // `serverIds` is optional on create/update. When present it fully
-  // replaces the membership — simpler for the UI and matches how the
-  // dashboard posts the edited form. Membership is wiped automatically on
-  // DELETE via the ON DELETE CASCADE FK, no manual cleanup needed.
   r.post('/server-groups', async (req, res, next) => {
     try {
       const body = parse(ServerGroupCreate, req.body);
@@ -215,19 +204,19 @@ export function crudRouter({ getWsHub }) {
   });
 
   // ─── servers ──────────────────────────────────────────────────────────
+  // Post-agentless, creating a server is just a name + hostname + labels.
+  // Auth to the target is via the controller's ~/.ssh/config.
   r.post('/servers', async (req, res, next) => {
     try {
       const body = parse(ServerCreate, req.body);
-      const rawToken = crypto.randomBytes(32).toString('base64url');
-      const tokenHash = sha256Hex(rawToken);
-      const row = await servers.create({ row: body, tokenHash });
+      const row = await servers.create({ row: body });
       await writeAudit({
         actor: actorOf(req), action: 'server.create',
         targetType: 'server', targetId: String(row.id),
         result: 'success', httpStatus: 201,
-        metadata: { name: body.name, hostname: body.hostname, artifact_transfer: body.artifact_transfer },
+        metadata: { name: body.name, hostname: body.hostname },
       });
-      res.status(201).json({ server: row, rawToken });
+      res.status(201).json(row);
     } catch (e) {
       if (e.code === 'ER_DUP_ENTRY') return next(new ConflictError('server name already exists'));
       next(e);
@@ -245,25 +234,6 @@ export function crudRouter({ getWsHub }) {
         result: 'success', httpStatus: 200, metadata: { fields: diffKeys(patch) },
       });
       res.json(row);
-    } catch (e) { next(e); }
-  });
-
-  r.post('/servers/:id/rotate-token', async (req, res, next) => {
-    try {
-      const id = parseId(req.params.id);
-      // Throws NotFoundError if the server is gone.
-      await servers.get(id);
-      const rawToken = crypto.randomBytes(32).toString('base64url');
-      const tokenHash = sha256Hex(rawToken);
-      await servers.rotateToken(id, tokenHash);
-      const hub = getWsHub?.();
-      const disconnected = hub?.disconnectServer(id, 'token-rotated') ?? false;
-      await writeAudit({
-        actor: actorOf(req), action: 'server.rotate-token',
-        targetType: 'server', targetId: String(id),
-        result: 'success', httpStatus: 200, metadata: { disconnected },
-      });
-      res.json({ rawToken });
     } catch (e) { next(e); }
   });
 

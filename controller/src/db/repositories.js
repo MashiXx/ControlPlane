@@ -27,17 +27,10 @@ function buildUpdate(table, id, patch, allowed) {
 
 // ─── servers ────────────────────────────────────────────────────────────
 const SERVER_EDITABLE_FIELDS = new Set([
-  'name', 'hostname', 'labels', 'artifact_transfer',
+  'name', 'hostname', 'labels',
 ]);
 
 export const servers = {
-  async findByTokenHash(hash, c) {
-    const [rows] = await conn(c).execute(
-      'SELECT * FROM servers WHERE auth_token_hash = :hash LIMIT 1',
-      { hash },
-    );
-    return rows[0] ?? null;
-  },
   async get(id, c) {
     const [rows] = await conn(c).execute(
       'SELECT * FROM servers WHERE id = :id LIMIT 1',
@@ -50,17 +43,13 @@ export const servers = {
     const [rows] = await conn(c).execute('SELECT * FROM servers ORDER BY name');
     return rows;
   },
-  async create({ row, tokenHash }, c) {
+  async create({ row }, c) {
     const [res] = await conn(c).execute(
-      `INSERT INTO servers
-         (name, hostname, auth_token_hash, artifact_transfer, labels)
-       VALUES
-         (:name, :hostname, :tokenHash, :artifactTransfer, :labels)`,
+      `INSERT INTO servers (name, hostname, labels)
+       VALUES (:name, :hostname, :labels)`,
       {
         name: row.name,
         hostname: row.hostname,
-        tokenHash,
-        artifactTransfer: row.artifact_transfer,
         labels: row.labels ? JSON.stringify(row.labels) : null,
       },
     );
@@ -71,13 +60,6 @@ export const servers = {
     if (!q) return this.get(id, c);
     await conn(c).execute(q.sql, q.params);
     return this.get(id, c);
-  },
-  async rotateToken(id, tokenHash, c) {
-    const [res] = await conn(c).execute(
-      'UPDATE servers SET auth_token_hash = :tokenHash WHERE id = :id',
-      { id, tokenHash },
-    );
-    if (res.affectedRows === 0) throw new NotFoundError('server', id);
   },
   async delete(id, c) {
     const n = await applications.countByServerId(id, c);
@@ -94,15 +76,6 @@ export const servers = {
     await conn(c).execute(
       'UPDATE servers SET status = :status, last_seen_at = CURRENT_TIMESTAMP WHERE id = :id',
       { id, status },
-    );
-  },
-  async updateSeen(id, patch = {}, c) {
-    await conn(c).execute(
-      `UPDATE servers SET status='online', last_seen_at=CURRENT_TIMESTAMP,
-              agent_version = COALESCE(:version, agent_version),
-              os            = COALESCE(:os, os)
-       WHERE id = :id`,
-      { id, version: patch.version ?? null, os: patch.os ?? null },
     );
   },
 };
@@ -245,16 +218,16 @@ export const groups = {
 
 // ─── applications ───────────────────────────────────────────────────────
 const APP_EDITABLE_FIELDS = new Set([
-  'name', 'group_id', 'runtime', 'build_strategy', 'artifact_pattern',
-  'remote_install_path', 'builder_server_id', 'repo_url', 'branch',
+  'name', 'group_id', 'runtime', 'artifact_pattern',
+  'remote_install_path', 'repo_url', 'branch',
   'workdir', 'install_cmd', 'build_cmd', 'start_cmd', 'stop_cmd',
   'launch_mode', 'status_cmd', 'logs_cmd', 'health_cmd', 'env',
   'trusted', 'enabled',
 ]);
 
 const APP_CREATE_COLUMNS = [
-  'name', 'server_id', 'group_id', 'runtime', 'build_strategy',
-  'artifact_pattern', 'remote_install_path', 'builder_server_id',
+  'name', 'server_id', 'group_id', 'runtime',
+  'artifact_pattern', 'remote_install_path',
   'repo_url', 'branch', 'workdir', 'install_cmd', 'build_cmd',
   'start_cmd', 'stop_cmd', 'launch_mode', 'status_cmd', 'logs_cmd',
   'health_cmd', 'env', 'trusted', 'enabled',
