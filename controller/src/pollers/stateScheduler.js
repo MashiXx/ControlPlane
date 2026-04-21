@@ -2,19 +2,23 @@
 //
 // Every STATE_POLL_INTERVAL_MS (default 30s) we:
 //
-//   1. For every non-'draining' server: `ssh <host> echo __cp_probe_ok__`.
+//   1. Load every enabled replica from application_servers (joined with
+//      servers and applications) via applicationServers.listForPoller().
+//      Replicas are grouped by server so we make at most one reachability
+//      ping per server per sweep.
+//
+//   2. For every non-'draining' server: `ssh <host> echo __cp_probe_ok__`.
 //      - Success  → mark 'online', reset miss counter.
 //      - Failure  → increment miss; at STATE_POLL_MISS_LIMIT in a row the
-//                   server flips to 'unreachable' and apps on it are marked
-//                   'unknown'.
+//                   server flips to 'unreachable' and all its replicas are
+//                   marked 'unknown'.
 //
-//   2. For every enabled app on an online server: run a per-launch-mode
-//      status probe. The result updates applications.process_state / pid /
-//      uptime_seconds.
+//   3. For every enabled replica on an online server: run a per-launch-mode
+//      status probe. The result updates application_servers.process_state /
+//      pid / uptime_seconds.
 //
-//   3. After each update we invoke the alert manager so a regression vs.
-//      expected_state pages the operator (same contract as before, just
-//      driven by our own polling instead of an agent heartbeat).
+//   4. After each replica update we invoke the alert manager so a regression
+//      vs. expected_state pages the operator.
 //
 // This module owns no state beyond a Map<serverId, missCount>. Everything
 // else is persisted in the DB, so controller restart picks up cleanly.
@@ -26,7 +30,7 @@ import {
 import { createLogger } from '@cp/shared/logger';
 
 import { runSsh, shellSafe } from '../ssh/sshClient.js';
-import { servers, applications } from '../db/repositories.js';
+import { servers, applicationServers } from '../db/repositories.js';
 
 const logger = createLogger({ service: 'controller.stateScheduler' });
 
@@ -55,111 +59,111 @@ export class StateScheduler {
   }
 
   async _runSweep() {
-    if (this._running) return;  // overlap-guard: a slow sweep must not stack
+    if (this._running) return;
     this._running = true;
     try {
-      const allServers = await servers.list();
-      await Promise.all(allServers.map((s) => this._pollServer(s).catch((err) =>
-        logger.warn({ err: err.message, serverId: s.id }, 'poll:server-error'),
-      )));
+      const replicas = await applicationServers.listForPoller();
+
+      // Group replicas by server so we make at most one reachability ping per
+      // server per sweep.
+      const byServer = new Map(); // serverId → { server, replicas: [] }
+      for (const r of replicas) {
+        if (!byServer.has(r.server_id)) {
+          byServer.set(r.server_id, {
+            server: {
+              id: r.server_id,
+              hostname: r.hostname,
+              name: r.server_name,
+              status: r.server_status,
+            },
+            replicas: [],
+          });
+        }
+        byServer.get(r.server_id).replicas.push(r);
+      }
+
+      await Promise.all([...byServer.values()].map((entry) =>
+        this._pollServer(entry).catch((err) =>
+          logger.warn({ err: err.message, serverId: entry.server.id }, 'poll:server-error'),
+        ),
+      ));
     } finally {
       this._running = false;
     }
   }
 
-  async _pollServer(server) {
+  async _pollServer({ server, replicas }) {
     if (server.status === ServerStatus.DRAINING) return;
     if (!server.hostname) return;
 
     try {
       const r = await runSsh(server.hostname, `echo ${PROBE_OK_MARKER}`, { timeoutMs: 10_000 });
       if (r.exitCode !== 0 || !r.stdoutTail.includes(PROBE_OK_MARKER)) {
-        return this._markMiss(server);
+        return this._markMiss(server, replicas);
       }
     } catch (err) {
-      return this._markMiss(server, err);
+      return this._markMiss(server, replicas, err);
     }
 
-    // Reachable — reset miss counter, stamp online.
     this.missCounts.delete(server.id);
     await servers.updateStatus(server.id, ServerStatus.ONLINE).catch(() => {});
 
-    // App-level polling. Done sequentially per server to keep the number of
-    // concurrent ssh processes bounded (one per server at a time).
-    const apps = await this._listEnabledApps(server.id);
-    for (const app of apps) {
-      await this._pollApp(server, app).catch((err) =>
-        logger.warn({ err: err.message, appId: app.id }, 'poll:app-error'),
+    for (const replica of replicas) {
+      await this._pollReplica(server, replica).catch((err) =>
+        logger.warn({ err: err.message, replicaId: replica.replica_id }, 'poll:replica-error'),
       );
     }
   }
 
-  async _listEnabledApps(serverId) {
-    // No tailored repo method; cheap enough to filter a list() result.
-    const rows = await applications.list();
-    return rows.filter((a) => a.server_id === serverId && a.enabled === 1);
-  }
-
-  async _markMiss(server, err) {
+  async _markMiss(server, replicas, err) {
     const n = (this.missCounts.get(server.id) ?? 0) + 1;
     this.missCounts.set(server.id, n);
-    logger.debug({
-      serverId: server.id, misses: n, err: err?.message,
-    }, 'poll:miss');
+    logger.debug({ serverId: server.id, misses: n, err: err?.message }, 'poll:miss');
 
     if (n >= STATE_POLL_MISS_LIMIT && server.status !== ServerStatus.UNREACHABLE) {
       await servers.updateStatus(server.id, ServerStatus.UNREACHABLE).catch(() => {});
+      await applicationServers.markUnknownForServer(server.id).catch(() => {});
       logger.warn({ serverId: server.id, misses: n }, 'server:unreachable');
-      // Flip every app on the unreachable server to 'unknown' and let the
-      // alert detector decide whether to page.
-      const apps = await this._listEnabledApps(server.id);
-      for (const app of apps) {
-        await applications.updateProcessState(app.id, { state: ProcessState.UNKNOWN }).catch(() => {});
-        if (this.alertManager) {
-          const fresh = await applications.get(app.id).catch(() => null);
-          if (fresh) await this.alertManager.evaluate(fresh, ProcessState.UNKNOWN, {
-            serverId: server.id,
-          });
+
+      if (this.alertManager) {
+        for (const replica of replicas) {
+          await this.alertManager.evaluate(
+            { ...replica, process_state: ProcessState.UNKNOWN },
+            ProcessState.UNKNOWN,
+          );
         }
       }
     }
   }
 
-  async _pollApp(server, app) {
-    // Remote status command, composed on the fly (we can't import remoteExec
-    // without a circular dep via the worker, so we inline the small bit we
-    // need here).
-    const probe = composeStatusProbe(app);
-    if (!probe) return;  // no way to probe this app (launch_mode='raw' without status_cmd)
+  async _pollReplica(server, replica) {
+    const probe = composeStatusProbe(replica);
+    if (!probe) return;
 
     let r;
     try {
       r = await runSsh(server.hostname, probe.cmd, { timeoutMs: 10_000 });
     } catch (err) {
-      // Single transient failure → mark UNKNOWN; don't propagate up, the
-      // server-level miss counter handles repeated failures.
-      await this._updateApp(app, { state: ProcessState.UNKNOWN });
+      await applicationServers.updateProcessState(replica.replica_id, { state: ProcessState.UNKNOWN });
       return;
     }
 
     const { state, pid, uptime } = probe.parse(r);
-    await this._updateApp(app, { state, pid, uptime });
+    await applicationServers.updateProcessState(replica.replica_id, { state, pid, uptime });
 
-    if (this.alertManager) {
-      const fresh = await applications.get(app.id).catch(() => null);
-      if (fresh) await this.alertManager.evaluate(fresh, state, {
-        serverId: server.id, pid,
-      });
-    }
-  }
-
-  async _updateApp(app, patch) {
-    await applications.updateProcessState(app.id, patch).catch(() => {});
     this.broadcastUi({
       op: 'state',
-      serverId: app.server_id,
-      apps: [{ id: app.id, state: patch.state, pid: patch.pid ?? null, uptimeSeconds: patch.uptime ?? null }],
+      serverId: server.id,
+      replicas: [{
+        applicationId: replica.application_id,
+        serverId: replica.server_id,
+        state, pid: pid ?? null, uptimeSeconds: uptime ?? null,
+      }],
     });
+
+    if (this.alertManager) {
+      await this.alertManager.evaluate({ ...replica, process_state: state }, state);
+    }
   }
 }
 
@@ -167,11 +171,15 @@ export class StateScheduler {
 // composeStatusProbe is inlined here rather than imported from remoteExec
 // because the poller runs on a timer and we want zero coupling to the
 // worker/exec pipeline.
-function composeStatusProbe(app) {
-  const mode = app.launch_mode ?? 'wrapped';
-  if (!app.remote_install_path) return null;
-  shellSafe(app.remote_install_path);
-  const currentDir = `${app.remote_install_path}/current`;
+//
+// The `replica` parameter is a joined row from applicationServers.listForPoller()
+// and carries launch_mode, status_cmd, start_cmd, remote_install_path — the
+// same fields the old `app` parameter had.
+function composeStatusProbe(replica) {
+  const mode = replica.launch_mode ?? 'wrapped';
+  if (!replica.remote_install_path) return null;
+  shellSafe(replica.remote_install_path);
+  const currentDir = `${replica.remote_install_path}/current`;
 
   if (mode === 'wrapped') {
     // Echoes: `running <pid> <etimes>` OR `stopped` with exit 1.
@@ -184,19 +192,19 @@ function composeStatusProbe(app) {
     return { cmd, parse: parseWrappedStatus };
   }
 
-  if (mode === 'systemd' && app.status_cmd) {
+  if (mode === 'systemd' && replica.status_cmd) {
     // Typically `systemctl is-active <unit>` — exit 0 = active.
     return {
-      cmd: app.status_cmd,
+      cmd: replica.status_cmd,
       parse: (r) => r.exitCode === 0
         ? { state: 'running', pid: null, uptime: null }
         : { state: 'stopped', pid: null, uptime: null },
     };
   }
 
-  if (mode === 'raw' && app.status_cmd) {
+  if (mode === 'raw' && replica.status_cmd) {
     return {
-      cmd: `cd ${currentDir} 2>/dev/null; ${app.status_cmd}`,
+      cmd: `cd ${currentDir} 2>/dev/null; ${replica.status_cmd}`,
       parse: (r) => r.exitCode === 0
         ? { state: 'running', pid: null, uptime: null }
         : { state: 'stopped', pid: null, uptime: null },
