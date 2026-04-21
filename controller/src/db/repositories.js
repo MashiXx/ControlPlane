@@ -62,15 +62,25 @@ export const servers = {
     return this.get(id, c);
   },
   async delete(id, c) {
-    const [rows] = await conn(c).execute(
-      `SELECT COUNT(*) AS n FROM application_servers WHERE server_id = :id`,
-      { id },
+    // Placement FK (applications.server_id) AND server_group_members both
+    // block a server delete — check both so the operator sees a clean
+    // conflict message rather than a cryptic FK error.
+    const [pin] = await conn(c).execute(
+      `SELECT COUNT(*) AS n FROM applications WHERE server_id = :id`, { id },
     );
-    const n = Number(rows[0].n);
-    if (n > 0) {
+    if (Number(pin[0].n) > 0) {
       throw new ConflictError(
-        `server ${id} still hosts ${n} replica(s); remove them first`,
-        { replicasReferencing: n },
+        `server ${id} is the placement of ${pin[0].n} application(s); reassign them first`,
+        { appsPinned: Number(pin[0].n) },
+      );
+    }
+    const [gm] = await conn(c).execute(
+      `SELECT COUNT(*) AS n FROM server_group_members WHERE server_id = :id`, { id },
+    );
+    if (Number(gm[0].n) > 0) {
+      throw new ConflictError(
+        `server ${id} is still a member of ${gm[0].n} server-group(s); remove it first`,
+        { groupsReferencing: Number(gm[0].n) },
       );
     }
     const [res] = await conn(c).execute('DELETE FROM servers WHERE id = :id', { id });
@@ -129,9 +139,28 @@ export const serverGroups = {
     return this.get(id, c);
   },
   async delete(id, c) {
+    // applications.server_group_id references this row with ON DELETE
+    // RESTRICT — surface that as a clean conflict before the FK fires.
+    const [pin] = await conn(c).execute(
+      `SELECT COUNT(*) AS n FROM applications WHERE server_group_id = :id`, { id },
+    );
+    if (Number(pin[0].n) > 0) {
+      throw new ConflictError(
+        `server-group ${id} is the placement of ${pin[0].n} application(s); reassign them first`,
+        { appsPinned: Number(pin[0].n) },
+      );
+    }
     // Members are removed automatically via ON DELETE CASCADE on the FK.
     const [res] = await conn(c).execute('DELETE FROM server_groups WHERE id = :id', { id });
     if (res.affectedRows === 0) throw new NotFoundError('server_group', id);
+  },
+  // List apps whose placement is this server-group; used by the CRUD layer
+  // to re-sync their replicas when membership changes.
+  async listDependentAppIds(id, c) {
+    const [rows] = await conn(c).execute(
+      `SELECT id FROM applications WHERE server_group_id = :id`, { id },
+    );
+    return rows.map((r) => Number(r.id));
   },
   async listMembers(id, c) {
     const [rows] = await conn(c).execute(
@@ -222,7 +251,8 @@ export const groups = {
 
 // ─── applications ───────────────────────────────────────────────────────
 const APP_EDITABLE_FIELDS = new Set([
-  'name', 'group_id', 'runtime', 'artifact_pattern',
+  'name', 'group_id', 'server_id', 'server_group_id',
+  'runtime', 'artifact_pattern',
   'remote_install_path', 'repo_url', 'branch',
   'workdir', 'install_cmd', 'build_cmd', 'start_cmd', 'stop_cmd',
   'launch_mode', 'status_cmd', 'logs_cmd', 'health_cmd', 'env',
@@ -230,7 +260,8 @@ const APP_EDITABLE_FIELDS = new Set([
 ]);
 
 const APP_CREATE_COLUMNS = [
-  'name', 'group_id', 'runtime', 'build_strategy',
+  'name', 'group_id', 'server_id', 'server_group_id',
+  'runtime', 'build_strategy',
   'artifact_pattern', 'remote_install_path',
   'repo_url', 'branch', 'workdir', 'install_cmd', 'build_cmd',
   'start_cmd', 'stop_cmd', 'launch_mode', 'status_cmd', 'logs_cmd',
@@ -264,8 +295,12 @@ export const applications = {
     const [rows] = await conn(c).execute(
       `SELECT a.*,
               COALESCE(c.total, 0)   AS replica_total,
-              COALESCE(c.running, 0) AS replica_running
+              COALESCE(c.running, 0) AS replica_running,
+              s.name  AS server_name,
+              sg.name AS server_group_name
          FROM applications a
+         LEFT JOIN servers       s  ON s.id  = a.server_id
+         LEFT JOIN server_groups sg ON sg.id = a.server_group_id
          LEFT JOIN (
            SELECT application_id,
                   COUNT(*) AS total,
@@ -299,6 +334,10 @@ export const applications = {
     return this.get(id, c);
   },
   async delete(id, c) {
+    // Replicas are derived from placement and cascade-drop via the
+    // application_servers FK, so the operator only needs to disable the app
+    // first. enabled=1 still blocks delete to catch accidental operator
+    // clicks on a live production app.
     const pool = conn(c);
     const connection = await pool.getConnection();
     try {
@@ -318,17 +357,6 @@ export const applications = {
           { enabled: rows[0].enabled },
         );
       }
-      const [rep] = await connection.execute(
-        'SELECT COUNT(*) AS n FROM application_servers WHERE application_id = :id',
-        { id },
-      );
-      if (Number(rep[0].n) > 0) {
-        await connection.rollback();
-        throw new ConflictError(
-          `application ${id} still has ${rep[0].n} replica(s); remove them first`,
-          { replicas: Number(rep[0].n) },
-        );
-      }
       await connection.execute('DELETE FROM applications WHERE id = :id', { id });
       await connection.commit();
     } catch (err) {
@@ -338,7 +366,69 @@ export const applications = {
       connection.release();
     }
   },
+  // Resolve the concrete list of server ids an app is currently placed on.
+  // Single-server placement → [server_id]; server-group placement → all
+  // current members of the group. Returns [] if the app is unplaced
+  // (transiently possible during edits) — callers should treat that as an
+  // operator error and refuse to enqueue actions.
+  async resolvePlacementServerIds(app, c) {
+    if (app.server_id != null) return [Number(app.server_id)];
+    if (app.server_group_id != null) {
+      return serverGroups.listMemberIds(Number(app.server_group_id), c);
+    }
+    return [];
+  },
 };
+
+// Reconcile application_servers rows with an app's current placement.
+// Call this whenever an app's placement changes OR a server-group's
+// membership changes. Semantics:
+//   - Compute the desired server ids from app.{server_id,server_group_id}.
+//   - Delete replica rows not in the desired set (preserving history would
+//     require a soft-delete; deferred).
+//   - Insert replica rows for desired-but-missing ones.
+// Runs in its own transaction.
+export async function syncAppReplicas(appId, c) {
+  const pool = conn(c);
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const app = await applications.get(appId, connection);
+    const desired = new Set(await applications.resolvePlacementServerIds(app, connection));
+    const [existingRows] = await connection.execute(
+      `SELECT server_id FROM application_servers WHERE application_id = :id`,
+      { id: appId },
+    );
+    const existing = new Set(existingRows.map((r) => Number(r.server_id)));
+
+    for (const sid of existing) {
+      if (!desired.has(sid)) {
+        await connection.execute(
+          `DELETE FROM application_servers
+             WHERE application_id = :id AND server_id = :sid`,
+          { id: appId, sid },
+        );
+      }
+    }
+    for (const sid of desired) {
+      if (!existing.has(sid)) {
+        await connection.execute(
+          `INSERT INTO application_servers (application_id, server_id)
+             VALUES (:id, :sid)`,
+          { id: appId, sid },
+        );
+      }
+    }
+    await connection.commit();
+    return { added: [...desired].filter((s) => !existing.has(s)),
+             removed: [...existing].filter((s) => !desired.has(s)) };
+  } catch (err) {
+    try { await connection.rollback(); } catch { /* already rolled back */ }
+    throw err;
+  } finally {
+    connection.release();
+  }
+}
 
 // ─── application_servers (per-replica state) ───────────────────────────
 //

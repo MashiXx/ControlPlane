@@ -57,7 +57,20 @@ export function readRouter() {
         applications.get(id),
         applicationServers.listForApp(id),
       ]);
-      res.json({ ...app, replicas });
+      // Enrich with human-readable placement names so the SPA can render
+      // "runs on server X" / "runs on server-group Y" without a join.
+      const [server, group] = await Promise.all([
+        app.server_id != null
+          ? servers.get(app.server_id).catch(() => null) : null,
+        app.server_group_id != null
+          ? serverGroups.get(app.server_group_id).catch(() => null) : null,
+      ]);
+      res.json({
+        ...app,
+        server_name: server?.name ?? null,
+        server_group_name: group?.name ?? null,
+        replicas,
+      });
     } catch (e) { next(e); }
   });
 
