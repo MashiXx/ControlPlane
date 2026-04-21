@@ -24,16 +24,8 @@ export function openApplicationForm({ initial, servers, groups, onSaved }) {
   const isEdit  = Boolean(initial);
   const running = isEdit && initial.process_state !== 'stopped';
 
-  if (!isEdit && servers.length === 0) {
-    alert('Create a server first — the app needs somewhere to run.');
-    return;
-  }
-
   const form = document.createElement('form');
 
-  const serverOpts = servers.map((s) =>
-    `<option value="${s.id}" ${initial?.server_id === s.id ? 'selected' : ''}>${escape(s.name)}</option>`,
-  ).join('');
   const groupOpts = ['<option value="">(none)</option>'].concat(
     groups.map((g) => `<option value="${g.id}" ${initial?.group_id === g.id ? 'selected' : ''}>${escape(g.name)}</option>`),
   ).join('');
@@ -51,9 +43,6 @@ export function openApplicationForm({ initial, servers, groups, onSaved }) {
     <fieldset><legend>Basics</legend>
       <label>Name
         <input name="name" required pattern="[a-z0-9-]{1,64}" value="${escape(initial?.name)}" ${isEdit ? '' : 'autofocus'}>
-      </label>
-      <label>Server
-        <select name="server_id" required ${isEdit ? 'disabled' : ''}>${serverOpts}</select>
       </label>
       <label>Group
         <select name="group_id">${groupOpts}</select>
@@ -223,10 +212,6 @@ function collect(form, isEdit) {
   };
 
   copyStr('name');
-  if (!isEdit) {
-    const sid = fd.get('server_id');
-    if (sid != null && String(sid) !== '') payload.server_id = Number(sid);
-  }
   const gid = fd.get('group_id');
   if (gid === '') payload.group_id = null;
   else if (gid != null) payload.group_id = Number(gid);

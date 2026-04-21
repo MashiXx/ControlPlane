@@ -58,4 +58,26 @@ export const apiClient = {
     'POST', '/actions',
     options ? { action, target, options } : { action, target },
   ),
+
+  listReplicas: (appId) => request('GET', `/applications/${appId}/servers`),
+
+  addReplica: (appId, serverId) => request(
+    'POST', `/applications/${appId}/servers`, { serverId },
+  ),
+
+  removeReplica: (appId, serverId) => request(
+    'DELETE', `/applications/${appId}/servers/${serverId}`,
+  ),
+
+  // Submit an action with an explicit server selector.
+  // `selector` is one of:
+  //   { serverId: N } | { serverIds: [N,...] } | { serverGroupId: N | 'name' }
+  submitAction: (action, appId, selector, extra = {}) => request(
+    'POST', '/actions',
+    {
+      action,
+      target: { type: 'app', id: appId },
+      options: { ...selector, ...extra },
+    },
+  ),
 };

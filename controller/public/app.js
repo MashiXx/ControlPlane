@@ -4,6 +4,7 @@ import { apiClient } from './api.js';
 import { openGroupForm, confirmDeleteGroup } from './forms/group.js';
 import { openServerForm, confirmDeleteServer } from './forms/server.js';
 import { openApplicationForm, confirmDeleteApp } from './forms/application.js';
+import { openReplicasDialog } from './forms/replica.js';
 import {
   openServerGroupForm, confirmDeleteServerGroup, deployToServerGroup,
 } from './forms/serverGroup.js';
@@ -88,7 +89,6 @@ function renderApps() {
 
   for (const a of filtered) {
     const groupName  = state.groups.find((g) => g.id === a.group_id)?.name ?? '-';
-    const serverName = state.servers.find((s) => s.id === a.server_id)?.name ?? String(a.server_id);
     const expected = a.expected_state ?? 'stopped';
     // Highlight a drift: expected running but actually stopped/crashed/unknown
     // is what the alert manager pages on.
@@ -100,7 +100,6 @@ function renderApps() {
     const row = el('tr', { class: drifted ? 'row-drift' : '' }, [
       el('td', {}, a.name),
       el('td', {}, groupName),
-      el('td', {}, serverName),
       el('td', {}, a.runtime),
       el('td', {}, [badge(a.process_state, a.process_state)]),
       el('td', {}, [badge(`expected-${expected}`, expected)]),
@@ -114,6 +113,10 @@ function renderApps() {
         el('button', { onclick: () => enqueue('restart', { type: 'app', id: a.id }) }, 'Restart'),
         el('button', { onclick: () => enqueue('deploy',  { type: 'app', id: a.id }) }, 'Deploy'),
         el('button', { onclick: () => enqueue('build',   { type: 'app', id: a.id }) }, 'Build'),
+        el('button', { onclick: async () => {
+          try { await openReplicasDialog(a, state.servers); }
+          catch (err) { alert(`Failed to load replicas: ${err.message}`); }
+        }}, 'Replicas'),
         el('button', { onclick: () => openApplicationForm({
           initial: a, servers: state.servers, groups: state.groups, onSaved: refresh,
         })}, 'Edit'),
