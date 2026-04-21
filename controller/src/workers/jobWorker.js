@@ -115,16 +115,18 @@ export function startWorkers({ broadcastUi, config }) {
 
       // Reflect the reported state onto application_servers so the dashboard
       // sees the outcome immediately rather than waiting for the next sweep.
+      // Best-effort: the poller will reconcile if the row write fails, but we
+      // log so a persistent mismatch (e.g. a removed replica row) is visible.
       if (action === JobAction.START || action === JobAction.RESTART) {
         await applicationServers.updateProcessState(
           (await applicationServers.get(app.id, server.id)).id,
           { state: ProcessState.RUNNING, startedAt: new Date() },
-        ).catch(() => {});
+        ).catch((err) => logger.warn({ err: err.message, appId: app.id, serverId: server.id }, 'replica:state-write-failed'));
       } else if (action === JobAction.STOP) {
         await applicationServers.updateProcessState(
           (await applicationServers.get(app.id, server.id)).id,
           { state: ProcessState.STOPPED, pid: null, uptime: null },
-        ).catch(() => {});
+        ).catch((err) => logger.warn({ err: err.message, appId: app.id, serverId: server.id }, 'replica:state-write-failed'));
       }
 
       await jobsRepo.markFinished(queueJobId, 'success', {
@@ -291,7 +293,7 @@ async function runDeploy({ job, app, triggeredBy, payload, onChunk }) {
       serverId: server.id,
       releaseId,
       artifactId: artifact.id,
-    }).catch(() => {});
+    }).catch((err) => logger.warn({ err: err.message, appId: app.id, serverId: server.id }, 'replica:onDeploySuccess-failed'));
     return {
       artifactId: artifact.id,
       releaseId,
