@@ -1,22 +1,16 @@
 // Telegram message formatting helpers. Uses Markdown V1 to keep it simple.
 
-const emojiForState = {
-  running:  '🟢',
-  stopped:  '⚪',
-  crashed:  '🔴',
-  starting: '🟡',
-  unknown:  '❔',
-};
-
 const emojiForJob = {
   pending: '🕒', running: '⚙️', success: '✅', failed: '❌', cancelled: '🚫',
 };
 
 export function fmtApps(apps) {
   if (!apps.length) return '_no applications_';
-  return apps.map((a) =>
-    `${emojiForState[a.process_state] ?? '❔'} *${escape(a.name)}*  _${a.process_state}_  (srv=${a.server_id})`,
-  ).join('\n');
+  return apps.map((a) => {
+    const running = a.replicaCountRunning ?? '?';
+    const total   = a.replicaCountTotal   ?? '?';
+    return `• *${escape(a.name)}*  ${running}/${total}  ${a.enabled ? '' : '(disabled)'}`;
+  }).join('\n');
 }
 
 export function fmtJob(job) {
