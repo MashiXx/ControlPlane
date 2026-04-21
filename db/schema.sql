@@ -191,7 +191,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 
   action          ENUM('start','stop','restart','build','deploy','healthcheck')
                   NOT NULL,
-  target_type     ENUM('app','group','server','server_group') NOT NULL,
+  target_type     ENUM('app','group','server') NOT NULL,
   application_id  BIGINT UNSIGNED NULL,
   group_id        BIGINT UNSIGNED NULL,
   server_id       BIGINT UNSIGNED NULL,
