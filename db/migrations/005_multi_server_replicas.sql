@@ -15,10 +15,8 @@ SET @dup := (SELECT COUNT(*) FROM (
   SELECT name FROM applications GROUP BY name HAVING COUNT(*) > 1
 ) t);
 SET @sql := IF(@dup > 0,
-  'SELECT CONCAT("ABORT: ", @dup, " duplicate application name(s); rename them before migrating.") INTO @abort FROM DUAL',
+  'SIGNAL SQLSTATE "45000" SET MESSAGE_TEXT = "duplicate application names — dedupe before migrating"',
   'SELECT 1');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-SET @sql := IF(@dup > 0, 'SIGNAL SQLSTATE "45000" SET MESSAGE_TEXT = "duplicate application names — dedupe before migrating"', 'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- 2. Create application_servers.
@@ -58,16 +56,24 @@ CREATE TABLE IF NOT EXISTS application_servers (
 ) ENGINE=InnoDB;
 
 -- 3. Seed replicas from the existing applications rows (only rows with a server_id).
-INSERT INTO application_servers
-  (application_id, server_id, process_state, expected_state,
-   pid, last_started_at, last_exit_code, last_exit_at,
-   uptime_seconds, last_alert_at)
-SELECT id, server_id,
-       process_state, expected_state,
-       pid, last_started_at, last_exit_code, last_exit_at,
-       uptime_seconds, last_alert_at
-  FROM applications
- WHERE server_id IS NOT NULL;
+-- Guard: only run if server_id column still exists on applications (skip on re-run).
+SET @col := (SELECT COLUMN_NAME FROM information_schema.COLUMNS
+              WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_NAME = 'applications'
+                AND COLUMN_NAME = 'server_id');
+SET @sql := IF(@col IS NOT NULL,
+  'INSERT IGNORE INTO application_servers
+     (application_id, server_id, process_state, expected_state,
+      pid, last_started_at, last_exit_code, last_exit_at,
+      uptime_seconds, last_alert_at)
+   SELECT id, server_id,
+          process_state, expected_state,
+          pid, last_started_at, last_exit_code, last_exit_at,
+          uptime_seconds, last_alert_at
+     FROM applications
+    WHERE server_id IS NOT NULL',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- 4. Drop the FK + indexes + columns from applications.
 -- Drop FK first, then indexes, then the column (MySQL rejects in reverse).
@@ -99,16 +105,21 @@ SET @idx := (SELECT INDEX_NAME FROM information_schema.STATISTICS
 SET @sql := IF(@idx IS NOT NULL, 'ALTER TABLE applications DROP INDEX uq_applications_name_server', 'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
-ALTER TABLE applications
-  DROP COLUMN server_id,
-  DROP COLUMN process_state,
-  DROP COLUMN expected_state,
-  DROP COLUMN pid,
-  DROP COLUMN last_started_at,
-  DROP COLUMN last_exit_code,
-  DROP COLUMN last_exit_at,
-  DROP COLUMN uptime_seconds,
-  DROP COLUMN last_alert_at;
+SET @col := (SELECT COLUMN_NAME FROM information_schema.COLUMNS
+              WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_NAME = 'applications'
+                AND COLUMN_NAME = 'server_id');
+SET @sql := IF(@col IS NOT NULL,
+  'ALTER TABLE applications DROP COLUMN server_id, DROP COLUMN process_state, DROP COLUMN expected_state, DROP COLUMN pid, DROP COLUMN last_started_at, DROP COLUMN last_exit_code, DROP COLUMN last_exit_at, DROP COLUMN uptime_seconds, DROP COLUMN last_alert_at',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- 5. Collapse the compound unique key to a single-column UNIQUE (name).
-ALTER TABLE applications ADD UNIQUE KEY uq_applications_name (name);
+SET @idx := (SELECT INDEX_NAME FROM information_schema.STATISTICS
+              WHERE TABLE_SCHEMA = DATABASE()
+                AND TABLE_NAME = 'applications'
+                AND INDEX_NAME = 'uq_applications_name' LIMIT 1);
+SET @sql := IF(@idx IS NULL,
+  'ALTER TABLE applications ADD UNIQUE KEY uq_applications_name (name)',
+  'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;

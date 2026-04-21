@@ -1,7 +1,7 @@
 -- ControlPlane — MySQL 8 schema (agentless)
 -- Charset: utf8mb4 throughout. Engine: InnoDB for transactional integrity.
 --
--- Reflects migrations 001 → 004. The controller now drives every target
+-- Reflects migrations 001 → 005. The controller now drives every target
 -- action over SSH; there is no per-server agent process, no bearer token,
 -- no HTTP artifact pull. Connection details (User / Port / IdentityFile /
 -- ProxyJump) live in the controller's ~/.ssh/config — nothing is per-server
