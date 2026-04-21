@@ -62,11 +62,15 @@ export const servers = {
     return this.get(id, c);
   },
   async delete(id, c) {
-    const n = await applications.countByServerId(id, c);
+    const [rows] = await conn(c).execute(
+      `SELECT COUNT(*) AS n FROM application_servers WHERE server_id = :id`,
+      { id },
+    );
+    const n = Number(rows[0].n);
     if (n > 0) {
       throw new ConflictError(
-        `server ${id} still has ${n} application(s); delete or migrate them first`,
-        { appsReferencing: n },
+        `server ${id} still hosts ${n} replica(s); remove them first`,
+        { replicasReferencing: n },
       );
     }
     const [res] = await conn(c).execute('DELETE FROM servers WHERE id = :id', { id });
@@ -226,7 +230,7 @@ const APP_EDITABLE_FIELDS = new Set([
 ]);
 
 const APP_CREATE_COLUMNS = [
-  'name', 'server_id', 'group_id', 'runtime',
+  'name', 'group_id', 'runtime', 'build_strategy',
   'artifact_pattern', 'remote_install_path',
   'repo_url', 'branch', 'workdir', 'install_cmd', 'build_cmd',
   'start_cmd', 'stop_cmd', 'launch_mode', 'status_cmd', 'logs_cmd',
@@ -256,13 +260,6 @@ export const applications = {
     const [rows] = await conn(c).execute('SELECT * FROM applications ORDER BY name');
     return rows;
   },
-  async countByServerId(serverId, c) {
-    const [rows] = await conn(c).execute(
-      'SELECT COUNT(*) AS n FROM applications WHERE server_id = :serverId',
-      { serverId },
-    );
-    return Number(rows[0].n);
-  },
   async create(row, c) {
     const params = {};
     for (const col of APP_CREATE_COLUMNS) {
@@ -290,19 +287,29 @@ export const applications = {
     try {
       await connection.beginTransaction();
       const [rows] = await connection.execute(
-        'SELECT enabled, process_state FROM applications WHERE id = :id FOR UPDATE',
+        'SELECT enabled FROM applications WHERE id = :id FOR UPDATE',
         { id },
       );
       if (!rows[0]) {
         await connection.rollback();
         throw new NotFoundError('application', id);
       }
-      const { enabled, process_state } = rows[0];
-      if (enabled === 1 || process_state !== 'stopped') {
+      if (rows[0].enabled === 1) {
         await connection.rollback();
         throw new ConflictError(
-          `application ${id} must be enabled=0 and process_state='stopped' (currently enabled=${enabled}, state='${process_state}')`,
-          { enabled, process_state },
+          `application ${id} must be enabled=0 before delete`,
+          { enabled: rows[0].enabled },
+        );
+      }
+      const [rep] = await connection.execute(
+        'SELECT COUNT(*) AS n FROM application_servers WHERE application_id = :id',
+        { id },
+      );
+      if (Number(rep[0].n) > 0) {
+        await connection.rollback();
+        throw new ConflictError(
+          `application ${id} still has ${rep[0].n} replica(s); remove them first`,
+          { replicas: Number(rep[0].n) },
         );
       }
       await connection.execute('DELETE FROM applications WHERE id = :id', { id });
@@ -314,23 +321,6 @@ export const applications = {
       connection.release();
     }
   },
-  async updateProcessState(id, patch, c) {
-    await conn(c).execute(
-      `UPDATE applications SET
-         process_state   = COALESCE(:state,       process_state),
-         pid             = :pid,
-         uptime_seconds  = :uptime,
-         last_exit_code  = COALESCE(:exitCode,    last_exit_code)
-       WHERE id = :id`,
-      {
-        id,
-        state:    patch.state    ?? null,
-        pid:      patch.pid      ?? null,
-        uptime:   patch.uptime   ?? null,
-        exitCode: patch.exitCode ?? null,
-      },
-    );
-  },
   // Set operator-expected state. Called from the orchestrator when a lifecycle
   // action is enqueued: start/restart/deploy → running, stop → stopped.
   // Deliberately NOT exposed through the CRUD update whitelist — expected
@@ -341,10 +331,142 @@ export const applications = {
       { id, expected },
     );
   },
-  async markAlerted(id, c) {
+};
+
+// ─── application_servers (per-replica state) ───────────────────────────
+//
+// Each row = one "replica": the fact that application X is registered on
+// server Y. Carries all per-replica runtime state that used to live on the
+// applications row. Lookups go via (application_id, server_id) which has a
+// UNIQUE index.
+export const applicationServers = {
+  async get(applicationId, serverId, c) {
+    const [rows] = await conn(c).execute(
+      `SELECT * FROM application_servers
+         WHERE application_id = :applicationId AND server_id = :serverId LIMIT 1`,
+      { applicationId, serverId },
+    );
+    if (!rows[0]) throw new NotFoundError('application_server', `${applicationId}@${serverId}`);
+    return rows[0];
+  },
+  async listForApp(applicationId, c) {
+    const [rows] = await conn(c).execute(
+      `SELECT ar.*, s.name AS server_name, s.hostname, s.status AS server_status
+         FROM application_servers ar
+         JOIN servers s ON ar.server_id = s.id
+        WHERE ar.application_id = :applicationId
+        ORDER BY s.name`,
+      { applicationId },
+    );
+    return rows;
+  },
+  async listForServer(serverId, c) {
+    const [rows] = await conn(c).execute(
+      `SELECT ar.*, a.name AS app_name, a.enabled
+         FROM application_servers ar
+         JOIN applications a ON ar.application_id = a.id
+        WHERE ar.server_id = :serverId
+        ORDER BY a.name`,
+      { serverId },
+    );
+    return rows;
+  },
+  async listForPoller(c) {
+    // Joined shape needed by the state scheduler: one row per replica with
+    // the server hostname + status and the app's launch-mode config.
+    const [rows] = await conn(c).execute(
+      `SELECT ar.id          AS replica_id,
+              ar.application_id, ar.server_id,
+              ar.process_state, ar.expected_state, ar.unreachable_count,
+              ar.last_alert_at,
+              s.hostname, s.name AS server_name, s.status AS server_status,
+              a.name AS app_name, a.launch_mode, a.status_cmd,
+              a.start_cmd, a.remote_install_path,
+              a.enabled
+         FROM application_servers ar
+         JOIN servers      s ON ar.server_id      = s.id
+         JOIN applications a ON ar.application_id = a.id
+        WHERE a.enabled = 1 AND s.status != 'draining'`,
+    );
+    return rows;
+  },
+  async serverIdsForApp(applicationId, c) {
+    const [rows] = await conn(c).execute(
+      `SELECT server_id FROM application_servers WHERE application_id = :applicationId`,
+      { applicationId },
+    );
+    return rows.map((r) => Number(r.server_id));
+  },
+  async insert({ applicationId, serverId }, c) {
+    const [res] = await conn(c).execute(
+      `INSERT INTO application_servers (application_id, server_id)
+         VALUES (:applicationId, :serverId)`,
+      { applicationId, serverId },
+    );
+    return res.insertId;
+  },
+  async remove(applicationId, serverId, c) {
+    const [res] = await conn(c).execute(
+      `DELETE FROM application_servers
+         WHERE application_id = :applicationId AND server_id = :serverId`,
+      { applicationId, serverId },
+    );
+    if (res.affectedRows === 0) {
+      throw new NotFoundError('application_server', `${applicationId}@${serverId}`);
+    }
+  },
+  async setExpectedState(applicationId, serverId, expected, c) {
     await conn(c).execute(
-      'UPDATE applications SET last_alert_at = CURRENT_TIMESTAMP WHERE id = :id',
-      { id },
+      `UPDATE application_servers
+          SET expected_state = :expected
+        WHERE application_id = :applicationId AND server_id = :serverId`,
+      { applicationId, serverId, expected },
+    );
+  },
+  async updateProcessState(replicaId, patch, c) {
+    // patch: { state?, pid?, uptime?, exitCode?, exitAt?, startedAt?, unreachableCount? }
+    await conn(c).execute(
+      `UPDATE application_servers SET
+         process_state     = COALESCE(:state, process_state),
+         pid               = :pid,
+         uptime_seconds    = :uptime,
+         last_started_at   = COALESCE(:startedAt, last_started_at),
+         last_exit_code    = COALESCE(:exitCode,  last_exit_code),
+         last_exit_at      = COALESCE(:exitAt,    last_exit_at),
+         unreachable_count = COALESCE(:unreachableCount, unreachable_count)
+       WHERE id = :replicaId`,
+      {
+        replicaId,
+        state:            patch.state ?? null,
+        pid:              patch.pid  ?? null,
+        uptime:           patch.uptime ?? null,
+        startedAt:        patch.startedAt ?? null,
+        exitCode:         patch.exitCode ?? null,
+        exitAt:           patch.exitAt ?? null,
+        unreachableCount: patch.unreachableCount ?? null,
+      },
+    );
+  },
+  async markAlerted(replicaId, c) {
+    await conn(c).execute(
+      `UPDATE application_servers SET last_alert_at = CURRENT_TIMESTAMP WHERE id = :replicaId`,
+      { replicaId },
+    );
+  },
+  async markUnknownForServer(serverId, c) {
+    await conn(c).execute(
+      `UPDATE application_servers SET process_state = 'unknown' WHERE server_id = :serverId`,
+      { serverId },
+    );
+  },
+  async onDeploySuccess({ applicationId, serverId, releaseId, artifactId }, c) {
+    await conn(c).execute(
+      `UPDATE application_servers
+          SET current_release_id  = :releaseId,
+              current_artifact_id = :artifactId,
+              expected_state      = 'running'
+        WHERE application_id = :applicationId AND server_id = :serverId`,
+      { applicationId, serverId, releaseId, artifactId },
     );
   },
 };
