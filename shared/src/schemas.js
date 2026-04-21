@@ -29,7 +29,7 @@ const gitRepoUrl = z.string().trim().max(512).refine(
 // deploys via rsync+ssh — build strategy is no longer a user choice.
 export const ApplicationConfig = z.object({
   name: identifier,
-  serverName: identifier,
+  serverNames: z.array(identifier).min(1),
   groupName: identifier.optional(),
   runtime: z.enum(Object.values(Runtime)).default(Runtime.JAVA),
 
@@ -65,18 +65,36 @@ export const ApplicationConfig = z.object({
 });
 
 // ─── API: enqueue an action ──────────────────────────────────────────────
-// `options` is an open bag today, but two keys have first-class semantics:
-//   - applicationId       → required when target.type='server_group' so the
-//                           orchestrator knows which app to fan a deploy out for
-//   - commitSha           → pins a specific git revision for a controller build
+
+// Server-selector shape — exactly one must be present when target.type='app'.
+const ServerSelector = z.object({
+  serverId:      z.number().int().positive().optional(),
+  serverIds:     z.array(z.number().int().positive()).min(1).optional(),
+  serverGroupId: z.union([z.number().int().positive(), identifier]).optional(),
+}).superRefine((val, ctx) => {
+  const keys = ['serverId', 'serverIds', 'serverGroupId'].filter((k) => val[k] !== undefined);
+  if (keys.length > 1) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `options.serverId, options.serverIds, options.serverGroupId are mutually exclusive (got ${keys.join(', ')})`,
+    });
+  }
+});
+
 export const EnqueueActionBody = z.object({
   action: z.enum(JobActions),
   target: z.object({
     type: z.enum(Object.values(JobTargetType)),
     id:   z.union([z.number().int().positive(), identifier]),
   }),
+  // options is validated loosely here — the orchestrator applies ServerSelector
+  // semantics after it resolves the target app. We keep the outer shape open
+  // so callers can still pass commitSha, applicationId (for target.type='group'),
+  // etc. alongside the server selector keys.
   options: z.record(z.string(), z.unknown()).optional(),
 });
+
+export { ServerSelector };
 
 // ─── CRUD payloads for /api/applications, /api/groups, /api/servers ──────
 //
@@ -125,7 +143,6 @@ const appBaseFields = {
 
 export const AppCreate = z.object({
   ...appBaseFields,
-  server_id: z.number().int().positive(),
 }).strict();
 
 export const AppUpdate = z.object(
@@ -168,4 +185,8 @@ export const ServerUpdate = z.object({
   name: dbName.optional(),
   hostname: z.string().min(1).max(255).optional(),
   labels: z.record(z.string(), z.string()).nullable().optional(),
+}).strict();
+
+export const ReplicaAddInput = z.object({
+  serverId: z.number().int().positive(),
 }).strict();
