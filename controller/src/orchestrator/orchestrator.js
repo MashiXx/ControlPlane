@@ -20,7 +20,7 @@
 import { enqueueAction, jobIdentity } from '@cp/queue';
 import {
   ExpectedState,
-  JobAction, JobActions, JobTargetType, ProcessState, RetryProfile,
+  JobAction, JobActions, JobTargetType, RetryProfile,
 } from '@cp/shared/constants';
 import { NotFoundError, ValidationError } from '@cp/shared/errors';
 import {
@@ -63,17 +63,20 @@ async function resolveTargetServerIds(app, options = {}) {
   const replicaIds = new Set(await applicationServers.serverIdsForApp(app.id));
   const targetIds = requested.filter((id) => replicaIds.has(id));
 
-  if (targetIds.length === 0) {
-    throw new ValidationError(
-      `no replicas of app '${app.name}' match the requested server set`,
-    );
-  }
-  // Surface the first requested-but-not-a-replica id for a clear error.
+  // For explicit-id selectors, surface the first non-replica id before the
+  // generic "no matches" error — the specific id is more actionable to the
+  // operator. For serverGroupId, silent-drop is intentional (bulk semantics).
   if (options.serverId !== undefined || Array.isArray(options.serverIds)) {
     const stray = requested.find((id) => !replicaIds.has(id));
     if (stray !== undefined) {
       throw new ValidationError(`server ${stray} is not a replica of app '${app.name}'`);
     }
+  }
+
+  if (targetIds.length === 0) {
+    throw new ValidationError(
+      `no replicas of app '${app.name}' match the requested server set`,
+    );
   }
   return targetIds;
 }
@@ -178,13 +181,19 @@ async function enqueueForApp(action, app, serverIds, triggeredBy, options) {
     });
 
     const enq = await enqueueAction(enqInput);
-    await applyExpectedState(app.id, serverId, action);
 
-    await writeAudit({
-      actor: triggeredBy, action, targetType: 'app', targetId: String(app.id),
-      jobId, result: 'info',
-      message: `queued ${action} for ${app.name}@server#${serverId}`,
-    });
+    // When jobsRepo.insert collided on the idempotency key, the original job
+    // is still owned by the first submitter — don't double-stamp expected
+    // state or write a duplicate audit.
+    if (jobId !== null) {
+      await applyExpectedState(app.id, serverId, action);
+      await writeAudit({
+        actor: triggeredBy, action, targetType: 'app', targetId: String(app.id),
+        jobId, result: 'info',
+        message: `queued ${action} for ${app.name}@server#${serverId}`,
+      });
+    }
+
     results.push({
       jobId,
       queueJobId: enq.queueJobId,
@@ -243,18 +252,19 @@ async function enqueueControllerBuild(
 
   const enq = await enqueueAction(enqInput);
 
-  // Flip expected=running per-replica so the alert detector understands the
-  // intent even if the deploy fails mid-way.
-  for (const sid of deployServerIds) {
-    await applyExpectedState(app.id, sid, JobAction.DEPLOY);
+  if (jobId !== null) {
+    // Flip expected=running per-replica so the alert detector understands the
+    // intent even if the deploy fails mid-way.
+    for (const sid of deployServerIds) {
+      await applyExpectedState(app.id, sid, JobAction.DEPLOY);
+    }
+    await writeAudit({
+      actor: triggeredBy, action: 'deploy.plan', targetType: 'app', targetId: String(app.id),
+      jobId, result: 'info',
+      message: `build-then-deploy for ${app.name} → ${deployServerIds.length} server(s)`,
+      metadata: { serverIds: deployServerIds, serverGroupName: serverGroupName ?? null },
+    });
   }
-
-  await writeAudit({
-    actor: triggeredBy, action: 'deploy.plan', targetType: 'app', targetId: String(app.id),
-    jobId, result: 'info',
-    message: `build-then-deploy for ${app.name} → ${deployServerIds.length} server(s)`,
-    metadata: { serverIds: deployServerIds, serverGroupName: serverGroupName ?? null },
-  });
 
   return {
     jobId,
