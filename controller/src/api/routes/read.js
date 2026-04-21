@@ -2,7 +2,8 @@
 
 import { Router } from 'express';
 import {
-  applications, groups, servers, serverGroups, jobs as jobsRepo, audit,
+  applications, applicationServers, groups, servers, serverGroups,
+  jobs as jobsRepo, audit,
 } from '../../db/repositories.js';
 
 export function readRouter() {
@@ -10,6 +11,17 @@ export function readRouter() {
 
   r.get('/servers', async (_req, res, next) => {
     try { res.json(await servers.list()); } catch (e) { next(e); }
+  });
+
+  r.get('/servers/:id', async (req, res, next) => {
+    try {
+      const id = Number(req.params.id);
+      const [server, apps] = await Promise.all([
+        servers.get(id),
+        applicationServers.listForServer(id),
+      ]);
+      res.json({ ...server, applications: apps });
+    } catch (e) { next(e); }
   });
 
   r.get('/groups', async (_req, res, next) => {
@@ -39,7 +51,14 @@ export function readRouter() {
   });
 
   r.get('/applications/:id', async (req, res, next) => {
-    try { res.json(await applications.get(Number(req.params.id))); } catch (e) { next(e); }
+    try {
+      const id = Number(req.params.id);
+      const [app, replicas] = await Promise.all([
+        applications.get(id),
+        applicationServers.listForApp(id),
+      ]);
+      res.json({ ...app, replicas });
+    } catch (e) { next(e); }
   });
 
   r.get('/jobs', async (req, res, next) => {
